@@ -65,7 +65,8 @@ class MoE1D(transformer.TransformerLayer):
                word_embed_mode=None,
                use_second_place_expert_prob=None,
                use_second_place_expert_prob_temp=None,
-               top_n_num_experts_per_token=3):
+               top_n_num_experts_per_token=3,
+               token_logging=False):
     self._hparams = HParams(
         moe_gating=moe_gating,
         moe_num_experts=num_experts,
@@ -97,6 +98,7 @@ class MoE1D(transformer.TransformerLayer):
             use_second_place_expert_prob_temp),
         moe_top_n_num_experts_per_token=top_n_num_experts_per_token)
     self._activation = activation
+    self.token_logging = token_logging
 
   def call(self, context, x, losses=None):
     """Call the layer."""
@@ -116,7 +118,13 @@ class MoE1D(transformer.TransformerLayer):
       output_dim = self._hparams.moe_output_dim
     else:
       output_dim = context.model.model_dim
-    y, loss = transformer_moe_layer_v1(
+    if self.token_logging:
+      tokens = _detokenize(context.inputs, context.model.vocabulary)
+      x = mtf.Print(x, [tokens], "tokens:", summarize=1000)
+      extras = _windows(context.inputs, context.length_dim)
+    else:
+      extras = None
+    y, loss, extras = transformer_moe_layer_v1(
         x,
         output_dim,
         self._hparams,
@@ -127,7 +135,16 @@ class MoE1D(transformer.TransformerLayer):
         nonpadding=context.nonpadding,
         activation=self._activation,
         num_microbatches=context.num_microbatches,
-        token_embeddings=context.input_embeddings)
+        token_embeddings=context.input_embeddings,
+        extras=extras)
+
+    if extras:
+      extras = _detokenize(extras, context.model.vocabulary)
+      experts_dim = mtf.Dimension("experts", self._hparams.moe_num_experts)
+      extras = mtf.unstack(extras, experts_dim)
+      for i, t in enumerate(extras):
+        y = mtf.Print(y, [t], "EXPERT %s:" % i, summarize=1000)
+
     if context.losses is not None:
       context.losses.append(loss)
     if not has_length_dim:
@@ -137,6 +154,23 @@ class MoE1D(transformer.TransformerLayer):
       else:
         y = mtf.reshape(y, x_shape)
     return y
+
+
+@gin.configurable
+def _windows(ids, length_dim, window_start=0, window_end=0):
+  to_stack = []
+  for offset in range(window_start, window_end + 1):
+    to_stack.append(mtf.shift(ids, -offset, length_dim, wrap=False))
+  return mtf.stack(to_stack, "window", axis=ids.shape.ndims)
+
+
+def _detokenize(ids, vocabulary):
+  return mtf.slicewise(
+      vocabulary.decode_tf,
+      [ids],
+      output_shape=mtf.Shape(ids.shape.dims[:-1]),
+      output_dtype=tf.string,
+      splittable_dims=ids.shape.dims[:-1])
 
 
 class MoE2D(transformer.TransformerLayer):
@@ -202,7 +236,7 @@ class MoE2D(transformer.TransformerLayer):
 def transformer_moe_layer_v1(
     inputs, output_dim, hparams, train, variable_dtype,
     layout=None, mesh_shape=None, nonpadding=None, activation=mtf.relu,
-    num_microbatches=None, token_embeddings=None):
+    num_microbatches=None, token_embeddings=None, extras=None):
   """Local mixture of experts that works well on TPU.
 
   Adapted from the paper https://arxiv.org/abs/1701.06538
@@ -281,6 +315,7 @@ def transformer_moe_layer_v1(
       [batch_dim(s), length_dim, input_dim]. These are the word embeddings for
       that correspond to the inputs. These can optionally be used to make
       routing decisions.
+    extras: a tensor to dispatch (for debugging purposes)
 
   Returns:
     outputs: a Tensor with shape [batch_dim(s), length_dim, output_dim]
@@ -344,6 +379,10 @@ def transformer_moe_layer_v1(
   # over which those groups are split.
   batch_and_length_dims, input_dim = (orig_inputs.shape.dims[:-1],
                                       orig_inputs.shape.dims[-1])
+
+  if extras:
+    extras_dims = extras.shape.dims[len(batch_and_length_dims):]
+
   # Hack: we assume that
   #   "outer_batch" == replication of experts
   #   mesh_dim_size can be derived from mesh_shape and orig_batch_dim
@@ -380,6 +419,11 @@ def transformer_moe_layer_v1(
   if hparams.moe_word_embed_mode is not None:
     token_embeddings = mtf.cast(
         mtf.reshape(token_embeddings, moe_input_dims), inputs.dtype)
+
+  if extras:
+    extras = mtf.reshape(
+        extras,
+        [outer_batch_dim, num_groups_dim, group_size_dim] + extras_dims)
 
   # Each sequence sends expert_capacity positions to each expert.
   if train:
@@ -503,6 +547,17 @@ def transformer_moe_layer_v1(
           input_dim
       ]))
 
+  if extras:
+    extras = mtf.einsum([extras, mtf.cast(dispatch_tensor, extras.dtype)],
+                        mtf.Shape([
+                            outer_batch_dim, experts_dim_unsplit,
+                            num_groups_dim, expert_capacity_dim] + extras_dims))
+    extras = mtf.reshape(
+        extras,
+        mtf.Shape([
+            outer_batch_dim, experts_dim, batch_dim_unsplit,
+            expert_capacity_dim] + extras_dims))
+
   # Now feed the expert inputs through the experts.
   h = mtf.layers.dense_product(
       expert_inputs,
@@ -559,10 +614,15 @@ def transformer_moe_layer_v1(
     k = _compute_output(k_h, layer_name="k_wo")
     outputs.append(q)
     outputs.append(k)
-    return outputs, loss * hparams.moe_loss_coef
+    return outputs, loss * hparams.moe_loss_coef, None
   else:
     output = _compute_output(h, layer_name="wo")
-    return output, loss * hparams.moe_loss_coef
+    loss *= hparams.moe_loss_coef
+
+    if extras:
+      return output, loss, extras
+    else:
+      return output, loss, None
 
 
 def transformer_moe_layer_v2(
