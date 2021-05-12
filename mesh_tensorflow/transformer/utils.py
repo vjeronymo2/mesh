@@ -1667,7 +1667,7 @@ def score_with_estimator(estimator, input_fn, eval_checkpoint_step, model_dir,
   Returns:
     a list of floats
   """
-  checkpoint_path, = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
+  checkpoint_path = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
 
   result_iter = estimator.predict(input_fn, checkpoint_path=checkpoint_path)
   # TODO(dei): This code is not well-designed for large-scale scoring, where the
