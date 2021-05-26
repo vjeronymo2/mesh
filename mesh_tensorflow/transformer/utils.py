@@ -2268,10 +2268,15 @@ def eval_model(estimator,
         summary = tf.Summary()
         targets = cached_targets[eval_dataset.name]
         metric_result = metric_fn(targets, predictions)
-        for metric_name, metric_value in metric_result.items():
-          tag = "eval/{}/{}".format(eval_dataset.name, metric_name)
-          tf.logging.info("%s at step %d: %.3f", tag, global_step, metric_value)
-          summary.value.add(tag=tag, simple_value=metric_value)
+        if isinstance(metric_result, tf.Summary):
+          tf.logging.info("Precomputed summary at step %d", global_step)
+          summary_writer.add_summary(metric_result, global_step)
+        else:
+          for metric_name, metric_value in metric_result.items():
+            tag = "eval/{}/{}".format(eval_dataset.name, metric_name)
+            tf.logging.info("%s at step %d: %.3f", tag, global_step,
+                            metric_value)
+            summary.value.add(tag=tag, simple_value=metric_value)
           summary_writer.add_summary(summary, global_step)
       summary_writer.flush()
 
