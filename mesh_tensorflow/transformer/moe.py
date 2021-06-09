@@ -977,8 +977,6 @@ def _switch_max_gating(
 
   if policy == "argmax" or policy == "input_dropout" or policy == "input_jitter":
     expert_gate, expert_index = mtf.top_1(raw_gates, reduced_dim=experts_dim)
-    if train:
-      mtf.scalar_summary("expert_gate", mtf.reduce_mean(expert_gate))
   elif policy == "sample":
     expert_index = mtf.sample_with_temperature(
         gate_logits, experts_dim, temperature=hparams.moe_switch_temperature)
@@ -1011,6 +1009,7 @@ def _switch_max_gating(
                              reduced_dim=experts_dim)
     batch_entropy = mtf.reduce_mean(entropy)
     mtf.scalar_summary(name + "/entropy", batch_entropy)
+    mtf.scalar_summary("expert_gate", mtf.reduce_mean(expert_gate))
 
     mask_count_experts = mtf.reduce_sum(expert_mask, output_shape=[experts_dim])
     total_routed = mtf.reduce_sum(mask_count_experts)
@@ -1209,8 +1208,6 @@ def _switch_gating(
 
   if policy == "argmax" or policy == "input_dropout" or policy == "input_jitter":
     expert_gate, expert_index = mtf.top_1(raw_gates, reduced_dim=experts_dim)
-    if train:
-      mtf.scalar_summary("expert_gate", mtf.reduce_mean(expert_gate))
   elif policy == "sample":
     expert_index = mtf.sample_with_temperature(
         gate_logits, experts_dim, temperature=hparams.moe_switch_temperature)
@@ -1243,6 +1240,7 @@ def _switch_gating(
                              reduced_dim=experts_dim)
     batch_entropy = mtf.reduce_mean(entropy)
     mtf.scalar_summary(name + "/entropy", batch_entropy)
+    mtf.scalar_summary("expert_gate", mtf.reduce_mean(expert_gate))
 
     mask_count_experts = mtf.reduce_sum(expert_mask, output_shape=[experts_dim])
     total_routed = mtf.reduce_sum(mask_count_experts)
