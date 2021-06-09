@@ -1775,7 +1775,7 @@ class SeparableConv1DLayer(Conv1D):
   across packed examples.
   """
 
-  def __init__(self,
+  def __init__(self,  # pylint: disable=super-init-not-called
                min_relative_pos,
                max_relative_pos,
                output_size,
@@ -2106,19 +2106,33 @@ class ParallelLayer(transformer.TransformerLayer):
   Outputs are summed and divided by sqrt(n).
   """
 
-  def __init__(self, layer_classes=(DenseReluDense, SelfAttention)):
+  def __init__(self,
+               layer_classes=(DenseReluDense, SelfAttention),
+               use_scope=True):
     """Create a ParallelLayer.
 
     Args:
       layer_classes: a list of TransformerLayer classes
+      use_scope: boolean, default True, which indicates whether to use unique
+        variable names for each parallel_layer. Here for backward compatibility.
     """
     self.layer_classes = [l() for l in layer_classes]
+    self.use_scope = use_scope
 
   def call(self, context, x, losses=None):
     """Call the layer."""
-    return (
-        mtf.add_n(
-            [l.call(context, x, losses=losses) for l in self.layer_classes])
-        * (len(self.layer_classes) ** -0.5))
+    layer_outputs = []
+
+    if self.use_scope:
+      # Provide unique variable name scopes to avoid overwriting.
+      for i, l in enumerate(self.layer_classes):
+        with tf.variable_scope("parallel_layer_%d" % i):
+          layer_output = l.call(context, x, losses=losses)
+          layer_outputs.append(layer_output)
+    else:
+      layer_outputs = [
+          l.call(context, x, losses=losses) for l in self.layer_classes
+      ]
+    return mtf.add_n(layer_outputs) * (len(self.layer_classes)**-0.5)
 
 
