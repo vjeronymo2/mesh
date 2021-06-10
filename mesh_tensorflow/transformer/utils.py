@@ -1371,6 +1371,7 @@ def write_lines_to_file(lines, filename):
   """
   if tf.io.gfile.exists(filename):
     tf.io.gfile.remove(filename)
+  tf.io.gfile.makedirs(os.path.dirname(filename))
   with tf.io.gfile.GFile(filename, "w") as output_file:
     for line in lines:
       output_file.write("{}\n".format(str(line).replace("\n", " ")))
