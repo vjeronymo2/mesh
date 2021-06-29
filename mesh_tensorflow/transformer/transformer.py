@@ -234,6 +234,7 @@ class Context(object):
     self.inputs = inputs
     self.encoder_inputs = encoder_inputs
     self.num_microbatches = num_microbatches
+    self.input_embeddings = None
 
   @property
   def train(self):
@@ -882,6 +883,7 @@ class Unitransformer(object):
           ensemble_dim=self.ensemble_dim)
     inputs = mtf.dropout(inputs, context.train, rate=self.token_dropout_rate)
     x = vocab_embedding.ids_to_embedding(inputs, context)
+    context.input_embeddings = x
     if self.positional_embedding or self.sinusoid_positional_embedding:
       if self.sinusoid_positional_embedding:
         pos_emb_var = sinusoid_positional_embedding_weights(

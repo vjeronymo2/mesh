@@ -61,7 +61,8 @@ class MoE1D(transformer.TransformerLayer):
                ntlb_top_k=4,
                output_dim=None,
                use_experts_attention=False,
-               z_loss=None):
+               z_loss=None,
+               word_embed_mode=None):
     self._hparams = HParams(
         moe_gating=moe_gating,
         moe_num_experts=num_experts,
@@ -85,7 +86,8 @@ class MoE1D(transformer.TransformerLayer):
         moe_output_dim=output_dim,
         moe_ntlb_top_k=ntlb_top_k,
         moe_use_experts_attention=use_experts_attention,
-        moe_z_loss=z_loss)
+        moe_z_loss=z_loss,
+        moe_word_embed_mode=word_embed_mode)
     self._activation = activation
 
   def call(self, context, x, losses=None):
@@ -116,7 +118,8 @@ class MoE1D(transformer.TransformerLayer):
         mesh_shape=context.model.mesh_shape,
         nonpadding=context.nonpadding,
         activation=self._activation,
-        num_microbatches=context.num_microbatches)
+        num_microbatches=context.num_microbatches,
+        token_embeddings=context.input_embeddings)
     if context.losses is not None:
       context.losses.append(loss)
     if not has_length_dim:
@@ -191,7 +194,7 @@ class MoE2D(transformer.TransformerLayer):
 def transformer_moe_layer_v1(
     inputs, output_dim, hparams, train, variable_dtype,
     layout=None, mesh_shape=None, nonpadding=None, activation=mtf.relu,
-    num_microbatches=None):
+    num_microbatches=None, token_embeddings=None):
   """Local mixture of experts that works well on TPU.
 
   Adapted from the paper https://arxiv.org/abs/1701.06538
@@ -266,6 +269,10 @@ def transformer_moe_layer_v1(
       and zeros(padding).
     activation: a function.
     num_microbatches: number of microbatches.
+    token_embeddings: a mtf.Tensor with shape
+      [batch_dim(s), length_dim, input_dim]. These are the word embeddings for
+      that correspond to the inputs. These can optionally be used to make
+      routing decisions.
 
   Returns:
     outputs: a Tensor with shape [batch_dim(s), length_dim, output_dim]
@@ -360,6 +367,12 @@ def transformer_moe_layer_v1(
   # OGSM Tensor
   inputs = mtf.reshape(inputs, moe_input_dims)
 
+  # Token embeddings that can be optionally used in the router for determining
+  # where to send tokens.
+  if hparams.moe_word_embed_mode is not None:
+    token_embeddings = mtf.cast(
+        mtf.reshape(token_embeddings, moe_input_dims), inputs.dtype)
+
   # Each sequence sends expert_capacity positions to each expert.
   if train:
     capacity_factor = hparams.moe_capacity_factor_train
@@ -401,7 +414,8 @@ def transformer_moe_layer_v1(
         train=train,
         variable_dtype=variable_dtype,
         importance=nonpadding,
-        num_microbatches=num_microbatches)
+        num_microbatches=num_microbatches,
+        token_embeddings=token_embeddings)
   elif hparams.moe_gating == "ntlb":
     dispatch_tensor, combine_tensor, loss = _ntlb_gating(
         inputs=inputs,
@@ -1175,7 +1189,7 @@ def _expert_selection_gating(
 def _switch_gating(
     inputs, outer_expert_dims, experts_dim, expert_capacity_dim,
     hparams, train, variable_dtype, importance=None, name="switch_gating",
-    num_microbatches=None):
+    num_microbatches=None, token_embeddings=None):
   """Compute Switch gating."""
   # SELECT EXPERT
   if train:
@@ -1186,6 +1200,8 @@ def _switch_gating(
   # The internals of this function run in float32.
   #   bfloat16 seems to reduce quality.
   gate_inputs = mtf.to_float(inputs)
+  if hparams.moe_word_embed_mode is not None:
+    token_embeddings = mtf.to_float(token_embeddings)
 
   # Input perturbations
   if policy == "input_dropout":
@@ -1196,6 +1212,20 @@ def _switch_gating(
   elif train and policy == "input_jitter":
     gate_inputs = mtf.layers.multiplicative_jitter(gate_inputs,
                                                    hparams.moe_switch_jitter)
+
+  if hparams.moe_word_embed_mode == "concat":
+    gate_inputs = mtf.concat(
+        [gate_inputs, token_embeddings], gate_inputs.shape.dims[-1].name)
+  elif hparams.moe_word_embed_mode == "concat_stop_grad":
+    token_embeddings = mtf.stop_gradient(token_embeddings)
+    gate_inputs = mtf.concat(
+        [gate_inputs, token_embeddings], gate_inputs.shape.dims[-1].name)
+  elif hparams.moe_word_embed_mode == "add":
+    gate_inputs += token_embeddings
+  elif hparams.moe_word_embed_mode == "add_stop_grad":
+    gate_inputs += mtf.stop_gradient(token_embeddings)
+  elif hparams.moe_word_embed_mode == "embed_only":
+    gate_inputs = token_embeddings
 
   gate_logits = mtf.layers.dense(
       gate_inputs,
