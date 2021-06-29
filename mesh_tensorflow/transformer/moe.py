@@ -62,7 +62,9 @@ class MoE1D(transformer.TransformerLayer):
                output_dim=None,
                use_experts_attention=False,
                z_loss=None,
-               word_embed_mode=None):
+               word_embed_mode=None,
+               use_second_place_expert_prob=None,
+               use_second_place_expert_prob_temp=None):
     self._hparams = HParams(
         moe_gating=moe_gating,
         moe_num_experts=num_experts,
@@ -87,7 +89,11 @@ class MoE1D(transformer.TransformerLayer):
         moe_ntlb_top_k=ntlb_top_k,
         moe_use_experts_attention=use_experts_attention,
         moe_z_loss=z_loss,
-        moe_word_embed_mode=word_embed_mode)
+        moe_word_embed_mode=word_embed_mode,
+        moe_use_second_place_expert_prob=(
+            use_second_place_expert_prob),
+        moe_use_second_place_expert_prob_temp=(
+            use_second_place_expert_prob_temp))
     self._activation = activation
 
   def call(self, context, x, losses=None):
@@ -815,6 +821,42 @@ def transformer_moe_layer_v2(
   return output, (loss_outer + loss_inner) * hparams.moe_loss_coef
 
 
+def _stochastically_use_non_top_expert(gate_logits, experts_dim, hparams):
+  """With a specified probability use the second place or lower experts."""
+  # With the specified probability use the second place expert in place of the
+  # top expert.
+  tf.logging.info("Using second place expert with prob: {}".format(
+      hparams.moe_use_second_place_expert_prob))
+  _, top_expert_index = mtf.top_1(gate_logits, reduced_dim=experts_dim)
+  top_expert_mask = mtf.one_hot(
+      top_expert_index, experts_dim, dtype=gate_logits.dtype)
+
+  # With probability moe_expert_use_second_place_expert_prob send the token to
+  # the non-top expert.
+  use_second_place_expert = mtf.cast(
+      mtf.less(
+          mtf.random_uniform(gate_logits.mesh, gate_logits.shape[:-1]),
+          hparams.moe_use_second_place_expert_prob), gate_logits.dtype)
+  # Mask out the top logit.
+  second_place_gate_logits = -1e9 * top_expert_mask + gate_logits
+
+  # If a temperature is specified sample from the remaining N-1 experts.
+  if hparams.moe_use_second_place_expert_prob_temp is not None:
+    tf.logging.info("Expert second place temp: {}".format(
+        hparams.moe_use_second_place_expert_prob_temp))
+    # What expert should be used.
+    second_expert_index = mtf.sample_with_temperature(
+        second_place_gate_logits, experts_dim,
+        temperature=hparams.moe_use_second_place_expert_prob_temp)
+    second_expert_mask = mtf.one_hot(
+        second_expert_index, experts_dim, dtype=gate_logits.dtype)
+    # Set all logits to -inf that are not the sampled expert
+    second_place_gate_logits += (1 - second_expert_mask) * -1e9
+  gate_logits = (use_second_place_expert * second_place_gate_logits +
+                 (1 - use_second_place_expert) * gate_logits)
+  return gate_logits
+
+
 def _ntlb_gating(inputs,
                  outer_expert_dims,
                  experts_dim,
@@ -843,6 +885,11 @@ def _ntlb_gating(inputs,
       expert_dims=outer_expert_dims,
       variable_dtype=variable_dtype,
       name=name)
+
+  if hparams.moe_use_second_place_expert_prob is not None and train:
+    gate_logits = _stochastically_use_non_top_expert(
+        gate_logits, experts_dim, hparams)
+
   raw_gates = mtf.softmax(gate_logits, reduced_dim=experts_dim)
 
   # The internals of this function run in float32.
@@ -987,6 +1034,11 @@ def _switch_max_gating(
       expert_dims=outer_expert_dims,
       variable_dtype=variable_dtype,
       name=name)
+
+  if hparams.moe_use_second_place_expert_prob is not None and train:
+    gate_logits = _stochastically_use_non_top_expert(
+        gate_logits, experts_dim, hparams)
+
   raw_gates = mtf.softmax(gate_logits, reduced_dim=experts_dim)
 
   if policy == "argmax" or policy == "input_dropout" or policy == "input_jitter":
@@ -1234,6 +1286,11 @@ def _switch_gating(
       expert_dims=outer_expert_dims,
       variable_dtype=variable_dtype,
       name=name)
+
+  if hparams.moe_use_second_place_expert_prob is not None and train:
+    gate_logits = _stochastically_use_non_top_expert(
+        gate_logits, experts_dim, hparams)
+
   raw_gates = mtf.softmax(gate_logits, reduced_dim=experts_dim)
 
   if policy == "argmax" or policy == "input_dropout" or policy == "input_jitter":
