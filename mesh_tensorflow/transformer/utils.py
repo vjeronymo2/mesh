@@ -2086,7 +2086,8 @@ def eval_model(estimator,
                eval_summary_dir,
                eval_checkpoint_step,
                eval_with_score=False,
-               output_eval_examples=True):
+               output_eval_examples=True,
+               eval_dir_suffix=None):
   """Eval a Mesh-TF model.
 
   Args:
@@ -2128,6 +2129,8 @@ def eval_model(estimator,
       targets instead of decoded predictions.
     output_eval_examples: bool, whether to dump inputs, targets and predictions
       of the eval examples in plaintext to eval_summary_dir.
+    eval_dir_suffix: string, if not None then will appended to the
+      eval_summary_dir.
   """
   if eval_dataset_fn is None:
     raise ValueError("Must provide eval_dataset_fn through gin for eval.")
@@ -2159,6 +2162,8 @@ def eval_model(estimator,
 
   eval_summary_dir = eval_summary_dir or os.path.join(
       model_dir, "{}_eval".format(dataset_split))
+  if eval_dir_suffix is not None:
+    eval_summary_dir += "_{}".format(eval_dir_suffix)
   summary_writer = tf.summary.FileWriter(eval_summary_dir)
 
   # Pre-load in all of the targets once before entering continuous eval loop
@@ -2659,7 +2664,8 @@ def run(tpu_job_name,
         skip_seen_data=False,
         seen_data_init_step=0,
         output_eval_examples=True,
-        checkpoint_input_pipeline=False):
+        checkpoint_input_pipeline=False,
+        eval_dir_suffix=None):
   """Run training, eval, or inference depending on `mode`.
 
   Args:
@@ -2735,6 +2741,9 @@ def run(tpu_job_name,
     checkpoint_input_pipeline: a boolean, whether to checkpoint the input
       pipeline in order to restart from the previous run. May require a large
       amount of disk space for complicated input pipelines.
+    eval_dir_suffix: a string, if not None then will be appended to the eval
+      subdirectory name for all three eval modes:
+      `perplexity_eval`, `eval`, `score_eval`.
   """
   if isinstance(sequence_length, int):
     sequence_length = {"inputs": sequence_length,
@@ -2866,6 +2875,8 @@ def run(tpu_job_name,
         # include the number of examples in the evaluation name so as to
         # make sure we are comparing apples to apples.
         name = "%s_%s_%d" % (eval_dataset.name, dataset_split, num_examples)
+        if eval_dir_suffix is not None:
+          name += "_%s" % eval_dir_suffix
         _ = estimator.evaluate(
             input_fn=functools.partial(_input_fn, eval_dataset=eval_dataset),
             steps=perplexity_eval_steps,
@@ -2883,7 +2894,8 @@ def run(tpu_job_name,
         eval_summary_dir,
         eval_checkpoint_step,
         eval_with_score=(mode == "score_eval"),
-        output_eval_examples=output_eval_examples)
+        output_eval_examples=output_eval_examples,
+        eval_dir_suffix=eval_dir_suffix)
   elif mode == "infer":
     infer_model(estimator, vocabulary, sequence_length, batch_size, model_type,
                 model_dir, eval_checkpoint_step)
