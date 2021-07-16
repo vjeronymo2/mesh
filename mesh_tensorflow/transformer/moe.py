@@ -1344,13 +1344,8 @@ def _switch_gating(
   # Add in the z_loss for router.
   if train and hparams.moe_z_loss is not None:
     tf.logging.info("Using z_loss: {}".format(hparams.moe_z_loss))
-    log_z = mtf.reduce_logsumexp(gate_logits, experts_dim)
-    z_loss = mtf.square(log_z)
-    if importance is not None:
-      z_loss *= mtf.cast(mtf.equal(importance, 1.0), dtype=z_loss.dtype)
-    denom = mtf.reduce_sum(
-        mtf.cast(mtf.equal(importance, 1.0), dtype=z_loss.dtype))
-    z_loss = mtf.reduce_sum(z_loss) / (denom * num_microbatches)
+    z_loss = _router_z_loss(gate_logits, experts_dim, num_microbatches,
+                            importance)
     mtf.scalar_summary(name + "/z_loss", z_loss)
     loss += (hparams.moe_z_loss * z_loss)
 
@@ -1468,12 +1463,12 @@ def _top_2_gating(
   # bfloat16 seems to reduce quality.
   gate_inputs = mtf.to_float(inputs)
 
-  raw_gates = mtf.layers.dense(
+  gate_logits = mtf.layers.dense(
       gate_inputs, experts_dim, use_bias=False,
       expert_dims=outer_expert_dims,
       variable_dtype=variable_dtype,
       name=name)
-  raw_gates = mtf.softmax(raw_gates, experts_dim)
+  raw_gates = mtf.softmax(gate_logits, experts_dim)
 
   expert_capacity_f = float(expert_capacity_dim.size)
 
@@ -1525,6 +1520,14 @@ def _top_2_gating(
     tf.logging.info("Dividing load-balance loss by num_microbatches={}".format(
         num_microbatches))
     loss /= num_microbatches
+
+  # Add in the z_loss for router.
+  if train and hparams.moe_z_loss is not None:
+    tf.logging.info("Using z_loss: {}".format(hparams.moe_z_loss))
+    z_loss = _router_z_loss(gate_logits, experts_dim, num_microbatches,
+                            importance)
+    mtf.scalar_summary(name + "/z_loss", z_loss)
+    loss += (hparams.moe_z_loss * z_loss)
 
   # Depending on the policy in the hparams, we may drop out some of the
   # second-place experts.
@@ -1665,6 +1668,29 @@ def _split_into_groups(n, max_group_size, mesh_dim_size):
       " = (num_groups=%d group_size=%d)" %
       (n, max_group_size, mesh_dim_size, num_groups, group_size))
   return num_groups, group_size
+
+
+def _router_z_loss(logits, experts_dim, num_microbatches, importance=None):
+  """Loss that encourages router logits to remain small and improves stability.
+
+  Args:
+    logits: a tensor with shape [<batch_dims>, experts_dim]
+    experts_dim: a Dimension (the number of experts)
+    num_microbatches: number of microbatches
+    importance: an optional tensor with shape [<batch_dims>, group_size_dim]
+
+  Returns:
+    z_loss: scalar loss only applied by non-padded tokens and normalized by
+      num_microbatches.
+  """
+  log_z = mtf.reduce_logsumexp(logits, experts_dim)
+  z_loss = mtf.square(log_z)
+  if importance is not None:
+    z_loss *= mtf.cast(mtf.equal(importance, 1.0), dtype=z_loss.dtype)
+  denom = mtf.reduce_sum(
+      mtf.cast(mtf.equal(importance, 1.0), dtype=z_loss.dtype))
+  z_loss = mtf.reduce_sum(z_loss) / (denom * num_microbatches)
+  return z_loss
 
 
 class HParams(object):
