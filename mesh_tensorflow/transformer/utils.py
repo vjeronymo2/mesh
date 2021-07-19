@@ -2031,7 +2031,8 @@ def train_model(estimator, vocabulary, sequence_length, batch_size,
   hooks = []
   if checkpoint_input_pipeline:
     hooks.append(
-        tf.data.experimental.CheckpointInputPipelineHook(estimator))
+        tf.data.experimental.CheckpointInputPipelineHook(
+            estimator, external_state_policy="warn"))
 
   estimator.train(input_fn=input_fn, max_steps=train_steps, hooks=hooks)
 
