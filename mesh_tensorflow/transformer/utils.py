@@ -268,8 +268,11 @@ def tpu_mesh_shape(tpu_topology=gin.REQUIRED,
   if tpu_topology.startswith("v"):
     num_cores = int(tpu_topology.split("-")[-1])
   else:
+    # check for twisted topologies
+    tpu_topology = tpu_topology.split("_twisted|_untwisted")[0]
     tpu_dim = [int(x) for x in tpu_topology.split("x")]
-    num_cores = functools.reduce(lambda x, y: x*y, tpu_dim) * 2
+    num_cores = functools.reduce(lambda x, y: x * y,
+                                 tpu_dim) * FLAGS.logical_cores_per_chip
   if isinstance(model_parallelism, list):
     # model_parallelism is actually a spec used to
     # construct a simd_mesh_impl.HierarchicalTiling object

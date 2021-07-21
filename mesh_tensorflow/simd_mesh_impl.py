@@ -32,6 +32,13 @@ import tensorflow.compat.v1 as tf
 
 from tensorflow.python.tpu.ops import tpu_ops  # pylint: disable=g-direct-tensorflow-import
 
+tf.flags.DEFINE_integer(
+    "logical_cores_per_chip",
+    default=2,
+    help="Number of logical accelerator cores per chip.")
+
+FLAGS = tf.flags.FLAGS
+
 
 @gin.configurable
 class SimdMeshImpl(mtf.MeshImpl):
@@ -879,7 +886,7 @@ def auto_logical_to_physical_tpu(logical_shape,
     return _default_value()
   # physical_shape is a triple of rows, cols, cores
   p0, p1, p2 = physical_shape
-  if p2 != 2:
+  if p2 != FLAGS.logical_cores_per_chip:
     return _default_value
   for dimsize in [p0, p1]:
     # if dimsize not a power of 2, give up
@@ -893,8 +900,8 @@ def auto_logical_to_physical_tpu(logical_shape,
     ring = _ring_2d(p0, p1)
     logical_to_physical = []
     for logical_pnum in range(num_cores):
-      core_on_chip = logical_pnum % 2
-      chip_num = logical_pnum // 2
+      core_on_chip = logical_pnum % FLAGS.logical_cores_per_chip
+      chip_num = logical_pnum // FLAGS.logical_cores_per_chip
       i, j = ring[chip_num]
       logical_to_physical.append((i, j, core_on_chip))
   else:
