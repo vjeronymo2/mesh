@@ -1814,10 +1814,10 @@ class StudentTeacher(object):
         tf.cond(
             tf.math.greater(global_step, self.distill_start_step),
             lambda: self.fraction_soft, lambda: tf.constant(0.0)),
-        dtype=tf.bfloat16)
+        dtype=soft_loss.dtype)
 
-    loss = (1.0 - current_fraction_soft) * hard_loss \
-           + self.temperature**2 * current_fraction_soft * soft_loss
+    loss = ((1.0 - current_fraction_soft) * hard_loss +
+            self.temperature**2 * current_fraction_soft * soft_loss)
 
     return student_logits, loss
 
