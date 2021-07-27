@@ -35,7 +35,8 @@ def attention(q,
               dropout_broadcast_dims=None,
               extra_logit=None,
               context=None,
-              float32_logits=True):
+              float32_logits=True,
+              z_loss_coeff=None):
   """Dot-product attention - doesn't use positional dimensions.
 
   key_dim is a Dimension representing the channels in the queries and keys
@@ -64,6 +65,9 @@ def attention(q,
     context: an optional Transformer.Context
     float32_logits: a boolean - if True, then compute logits in float32 to avoid
       numerical issues with bfloat16
+    z_loss_coeff: a float, if z_loss_coeff is not None then add an auxiliary
+      loss to push the attention logits closer to zero. This helps to stabilize
+      model training.
 
   Returns:
     Tensor with shape q.shape - key_dim + value_dim
@@ -77,6 +81,24 @@ def attention(q,
   logits = mtf.layers.us_einsum([q, k], reduced_dims=[key_dim])
   if bias is not None:
     logits += mtf.cast(bias, logits.dtype)
+
+  # Adds auxiliary z-loss to push the attention logits towards zero.
+  if z_loss_coeff is not None:
+    tf.logging.info("attention z_loss being added: {}".format(
+        tf.get_variable_scope().name))
+    log_z = mtf.reduce_logsumexp(logits, memory_length_dim)
+    z_loss = mtf.square(log_z) * mtf.cast(context.nonpadding, log_z.dtype)
+    z_loss = mtf.reduce_mean(z_loss)
+    if context.num_microbatches and context.num_microbatches > 1:
+      tf.logging.info(
+          "Dividing attention z-loss loss by num_microbatches={}".format(
+              context.num_microbatches))
+      z_loss /= context.num_microbatches
+    if context.train:
+      mtf.scalar_summary("attention_z_loss", z_loss)
+    z_loss *= z_loss_coeff
+    context.losses.append(mtf.cast(z_loss, v.dtype))
+
   weights = mtf.softmax(logits, memory_length_dim, extra_logit=extra_logit)
   weights = mtf.cast(weights, v.dtype)
   weights = mtf.dropout(

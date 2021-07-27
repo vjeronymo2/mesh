@@ -165,7 +165,8 @@ class SelfAttention(transformer.TransformerLayer):
                attention_func=None,
                combine_dims=True,
                keep_query_heads_dims=False,
-               fold_scaling_into_initializer=True):
+               fold_scaling_into_initializer=True,
+               z_loss_coeff=None):
     """Create a SelfAttention Layer.
 
     Args:
@@ -182,6 +183,9 @@ class SelfAttention(transformer.TransformerLayer):
       combine_dims: a boolean
       keep_query_heads_dims: a boolean
       fold_scaling_into_initializer: a boolean
+      z_loss_coeff: a float, if z_loss_coeff is not None then add an auxiliary
+        loss to push the attention logits closer to zero. This helps to
+        stabilize model training.
     """
     self.num_heads = num_heads
     self.num_memory_heads = num_memory_heads
@@ -195,6 +199,7 @@ class SelfAttention(transformer.TransformerLayer):
     self.combine_dims = combine_dims
     self.keep_query_heads_dims = keep_query_heads_dims
     self.fold_scaling_into_initializer = fold_scaling_into_initializer
+    self.z_loss_coeff = z_loss_coeff
 
   def layer_output_from_attention_output(self, context, attention_output,
                                          losses):
@@ -262,6 +267,7 @@ class SelfAttention(transformer.TransformerLayer):
         key_dim=self.kv_dim, value_dim=self.kv_dim,
         bias=self.compute_bias(context, memory_position, x,
                                params.query_heads_dims, q),
+        z_loss_coeff=self.z_loss_coeff,
         **self.attention_kwargs_from_context(context))
     attention_output_shape = self.expected_attention_output_shape(x, params)
     attention_output = params.compute_output(
@@ -720,7 +726,8 @@ def enc_dec_attention_bias(layer,
 
 @gin.configurable
 def enc_dec_attention(self_attention_layer, memory_antecedent, context, x,
-                      losses, attention_fn=attention.attention):
+                      losses, attention_fn=attention.attention,
+                      z_loss_coeff=None):
   """Multi-head attention over the encoder outputs."""
   memory_input_dim = memory_antecedent.shape[-1]
   if memory_input_dim != context.model.model_dim:
@@ -749,6 +756,7 @@ def enc_dec_attention(self_attention_layer, memory_antecedent, context, x,
       q, k, v, memory_length, self_attention_layer.kv_dim,
       self_attention_layer.kv_dim, bias,
       context=context,
+      z_loss_coeff=z_loss_coeff,
       **self_attention_layer.attention_kwargs_from_context(context))
   attention_output_shape = self_attention_layer.expected_attention_output_shape(
       x, params)
@@ -773,7 +781,8 @@ class EncDecAttention(SelfAttention):
     """Call the layer."""
     return enc_dec_attention(self, self._get_memory_antecedent(context),
                              context, x, losses,
-                             attention_fn=self.attention_fn)
+                             attention_fn=self.attention_fn,
+                             z_loss_coeff=self.z_loss_coeff)
 
   @property
   def attention_fn(self):
