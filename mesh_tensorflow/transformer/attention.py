@@ -663,6 +663,8 @@ class ExpertsAttentionParams(AttentionParams):
     if mtf.layers.unit_scaling_convention():
       raise NotImplementedError
 
+    # TODO(barretzoph): Make this work for model parallelism by not outputing
+    # a tensor with `heads` dim.
     moe_output_dims = self.q_shape[-1]
     tf.logging.info("ExpertsAttention moe_hidden_size: {}".format(
         experts_hparams.hidden_size))
@@ -680,10 +682,12 @@ class ExpertsAttentionParams(AttentionParams):
         switch_dropout=experts_hparams.switch_dropout,
         switch_temperature=experts_hparams.switch_temperature,
         switch_jitter=experts_hparams.switch_jitter,
-        switch_top_k=experts_hparams.switch_top_k,
+        ntlb_top_k=experts_hparams.ntlb_top_k,
         hidden_size=experts_hparams.hidden_size,
         output_dim=moe_output_dims,
-        use_experts_attention=experts_hparams.use_experts_attention)
+        use_experts_attention=experts_hparams.use_experts_attention,
+        activation=experts_hparams.activation,
+        z_loss=experts_hparams.z_loss)
 
   def _compute_merge_qkv(self, antecedent):
     """Computes qkv all in one call using MoE layer."""

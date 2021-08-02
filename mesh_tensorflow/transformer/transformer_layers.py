@@ -402,9 +402,11 @@ class ExpertsSelfAttention(SelfAttention):
                switch_dropout=0.0,
                switch_temperature=1.0,
                switch_jitter=1e-2,
-               switch_top_k=4,
+               ntlb_top_k=4,
                hidden_size=3072,
                use_experts_attention=True,
+               activation="relu",
+               z_loss=None,
                **kwargs):
     super(ExpertsSelfAttention, self).__init__(**kwargs)
     self._hparams = mtf.transformer.moe.HParams(
@@ -420,9 +422,11 @@ class ExpertsSelfAttention(SelfAttention):
         switch_dropout=switch_dropout,
         switch_temperature=switch_temperature,
         switch_jitter=switch_jitter,
-        switch_top_k=switch_top_k,
+        ntlb_top_k=ntlb_top_k,
         hidden_size=hidden_size,
-        use_experts_attention=use_experts_attention)
+        use_experts_attention=use_experts_attention,
+        activation=activation,
+        z_loss=z_loss)
 
   def make_params(self, context):
     num_heads = self.num_heads
