@@ -633,7 +633,8 @@ class ExpertsAttentionParams(AttentionParams):
                keep_query_heads_dims=False,
                fold_scaling_into_initializer=True,
                context=None,
-               experts_hparams=None):
+               experts_hparams=None,
+               expert_computation="qkv"):
     super(ExpertsAttentionParams, self).__init__(
         mesh=mesh,
         query_input_dim=query_input_dim,
@@ -653,19 +654,48 @@ class ExpertsAttentionParams(AttentionParams):
         make_attention_vars=False)
 
     self.context = context
+    self.expert_computation = expert_computation
+
+    # Unless we want to compute both q and kv, we can use the normal MoE
+    # settings.
+    if expert_computation == "qkv":
+      experts_attention_compute_qkv = True
+    elif expert_computation in ["q", "kv"]:
+      experts_attention_compute_qkv = False
+      if expert_computation == "q":
+        # Always assume shared_kv.
+        self.wkv = mtf.get_variable(
+            self.mesh,
+            "kv",
+            self.k_shape,
+            initializer=tf.random_normal_initializer(
+                stddev=self.memory_input_dim.size ** -0.5),
+            dtype=self.variable_dtype)
+      else:  # Computing kv with experts.
+        self.wq = mtf.get_variable(
+            self.mesh,
+            "q",
+            self.q_shape,
+            initializer=tf.random_normal_initializer(
+                stddev=self.query_input_dim.size ** -0.5),
+            dtype=self.variable_dtype)
+    else:
+      raise ValueError("Invalid expert computation mode: {}".format(
+          expert_computation))
 
     # ExpertsAttention, for simplicitly, asserts that combine_dims is True, and
     # for efficiency, that shared_kv is True.
     if not self.combine_dims:
-      raise ValueError("self.combine_dims must be True for ExpertsAttention")
+      raise ValueError("combine_dims must be True for ExpertsAttention.")
     if not self.shared_kv:
-      raise ValueError("self.shared_kv must be True for ExpertsAttention")
+      raise ValueError("shared_kv must be True for ExpertsAttention.")
     if mtf.layers.unit_scaling_convention():
       raise NotImplementedError
 
-    # TODO(barretzoph): Make this work for model parallelism by not outputing
-    # a tensor with `heads` dim.
-    moe_output_dims = self.q_shape[-1]
+    # Now replace "heads" dim with the "d_model" name to avoid conflicts when
+    # we want to partition both "experts_hidden" and "heads".
+    moe_output_dims = mtf.Dimension("d_model", self.q_shape[-1].size)
+
     tf.logging.info("ExpertsAttention moe_hidden_size: {}".format(
         experts_hparams.hidden_size))
     tf.logging.info("moe_output_dims: {}".format(moe_output_dims))
@@ -685,16 +715,39 @@ class ExpertsAttentionParams(AttentionParams):
         ntlb_top_k=experts_hparams.ntlb_top_k,
         hidden_size=experts_hparams.hidden_size,
         output_dim=moe_output_dims,
-        use_experts_attention=experts_hparams.use_experts_attention,
+        use_experts_attention=experts_attention_compute_qkv,
         activation=experts_hparams.activation,
         z_loss=experts_hparams.z_loss)
 
   def _compute_merge_qkv(self, antecedent):
     """Computes qkv all in one call using MoE layer."""
-    # NOTE: This assumes querty and memory antecedent are the same
-    qk = self.moe_layer.call(self.context, antecedent)
-    # Split qk here since they went through experts-layers
-    q, k = qk
+    def _replace_d_model_dim(t):
+      """Used to replace the `d_model` dim with `heads`."""
+      new_last_dim = mtf.Dimension(self.q_shape[-1].name, t.shape[-1].size)
+      return mtf.reshape(
+          t, new_shape=mtf.Shape(t.shape[:-1] + [new_last_dim]))
+    if self.expert_computation == "qkv":
+      # NOTE: This assumes querty and memory antecedent are the same
+      qk = self.moe_layer.call(self.context, antecedent)
+      # Split qk here since they went through experts-layers
+      q, k = qk
+      q = _replace_d_model_dim(q)
+      k = _replace_d_model_dim(k)
+    elif self.expert_computation == "q":
+      q = self.moe_layer.call(self.context, antecedent)
+      q = _replace_d_model_dim(q)
+      # Compute key/value normally
+      k = mtf.layers.us_einsum(
+          [antecedent, self.wkv], reduced_dims=[self.memory_input_dim])
+    elif self.expert_computation == "kv":
+      k = self.moe_layer.call(self.context, antecedent)
+      k = _replace_d_model_dim(k)
+      # Compute query normally
+      q = mtf.layers.us_einsum(
+          [antecedent, self.wq], reduced_dims=[self.query_input_dim])
+    else:
+      raise ValueError("Invalid expert computation mode: {}".format(
+          self.expert_computation))
 
     # Scale query
     q *= self.key_dim.size ** -0.5

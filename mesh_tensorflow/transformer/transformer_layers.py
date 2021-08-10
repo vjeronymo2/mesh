@@ -404,11 +404,12 @@ class ExpertsSelfAttention(SelfAttention):
                switch_jitter=1e-2,
                ntlb_top_k=4,
                hidden_size=3072,
-               use_experts_attention=True,
                activation="relu",
                z_loss=None,
+               expert_computation="qkv",
                **kwargs):
     super(ExpertsSelfAttention, self).__init__(**kwargs)
+    self.expert_computation = expert_computation
     self._hparams = mtf.transformer.moe.HParams(
         moe_gating=moe_gating,
         num_experts=num_experts,
@@ -424,7 +425,6 @@ class ExpertsSelfAttention(SelfAttention):
         switch_jitter=switch_jitter,
         ntlb_top_k=ntlb_top_k,
         hidden_size=hidden_size,
-        use_experts_attention=use_experts_attention,
         activation=activation,
         z_loss=z_loss)
 
@@ -464,7 +464,8 @@ class ExpertsSelfAttention(SelfAttention):
         keep_query_heads_dims=self.keep_query_heads_dims,
         fold_scaling_into_initializer=self.fold_scaling_into_initializer,
         context=context,
-        experts_hparams=self._hparams)
+        experts_hparams=self._hparams,
+        expert_computation=self.expert_computation)
 
 
 @gin.configurable
