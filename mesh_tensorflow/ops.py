@@ -5447,6 +5447,49 @@ def processor_coordinates_to_pnum(mesh_shape, coord):
   return ret
 
 
+def pnum_to_processor_coordinates_nd(mesh_shape, pnum, device_assignment):
+  """Coordinates of a processor number in the mesh with a device assignment.
+
+  Args:
+    mesh_shape: a Shape or a list of integers
+    pnum: an integer less than len(mesh_shape)
+    device_assignment: accelerator device assignment
+
+  Returns:
+    a list of integers with length len(mesh_shape)
+  """
+  del mesh_shape
+  return device_assignment.coordinates(pnum, 0)
+
+
+def processor_coordinates_to_pnum_map_nd(mesh_shape, logical_to_physical,
+                                         device_assignment):
+  """Inverse map of pnum_to_processor_coordinates.
+
+  Args:
+    mesh_shape: a Shape or a list of integers
+    logical_to_physical: a list of coordinates with length len(mesh_shape)
+    device_assignment: accelerator device assignment
+
+  Returns:
+    A map of logical to physical pnums
+  """
+  coordinate_map = []
+  num_replicas = device_assignment.num_replicas
+  hw_mesh_shape = [int(i) for i in device_assignment.topology.mesh_shape]
+  for i in range(num_replicas):
+    coordinate_map.append(-1)
+  for i in range(num_replicas):
+    coord = device_assignment.coordinates(i, 0)
+    logical_id = coord[0] + coord[1] * hw_mesh_shape[0] + coord[
+        2] * hw_mesh_shape[0] * hw_mesh_shape[1]
+    coordinate_map[logical_id] = i
+  return [
+      coordinate_map[coord[0] + coord[1] * mesh_shape[0]]
+      for coord in logical_to_physical
+  ]
+
+
 def pnum_to_group(mesh_shape, group_dims, pnum):
   """Group number for grouped allreduce.
 

@@ -269,7 +269,7 @@ def tpu_mesh_shape(tpu_topology=gin.REQUIRED,
     num_cores = int(tpu_topology.split("-")[-1])
   else:
     # check for twisted topologies
-    tpu_topology = tpu_topology.split("_twisted|_untwisted")[0]
+    tpu_topology = re.split("_twisted|_untwisted", tpu_topology)[0]
     tpu_dim = [int(x) for x in tpu_topology.split("x")]
     num_cores = functools.reduce(lambda x, y: x * y,
                                  tpu_dim) * FLAGS.logical_cores_per_chip
@@ -608,17 +608,21 @@ def tpu_estimator_model_fn(model_type,
                                                     devices_memeory_usage)
       physical_shape = [int(i) for i in
                         params["context"].device_assignment.topology.mesh_shape]
+      mesh_4d = False
       if len(physical_shape) == 4:
+        mesh_4d = True if physical_shape[2] > 1 else False
         physical_shape = (
             mtf.simd_mesh_impl.physical_shape_3d_from_topology_proto_4d(
                 physical_shape))
-      if hierarchical_tiling_spec is not None:
+      if mesh_4d or hierarchical_tiling_spec is None:
+        logical_to_physical = mtf.simd_mesh_impl.auto_logical_to_physical_tpu(
+            mesh_shape.to_integer_list,
+            physical_shape,
+            device_assignment=params["context"].device_assignment)
+      else:
         logical_to_physical = mtf.simd_mesh_impl.HierarchicalTiling(
             hierarchical_tiling_spec,
             physical_shape).logical_to_physical
-      else:
-        logical_to_physical = mtf.simd_mesh_impl.auto_logical_to_physical_tpu(
-            mesh_shape.to_integer_list, physical_shape)
       mesh_impl = mtf.simd_mesh_impl.SimdMeshImpl(
           mesh_shape, layout_rules, mesh_devices, ctx.device_assignment,
           logical_to_physical=logical_to_physical)

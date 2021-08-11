@@ -37,6 +37,11 @@ tf.flags.DEFINE_integer(
     default=2,
     help="Number of logical accelerator cores per chip.")
 
+tf.flags.DEFINE_bool(
+    "fold_xy",
+    default=False,
+    help="On a 3-D torus fold x and y dimensions into one logical dimension.")
+
 FLAGS = tf.flags.FLAGS
 
 
@@ -835,12 +840,16 @@ def physical_shape_3d_from_topology_proto_4d(mesh_shape):
   """
   if len(mesh_shape) != 4:
     raise ValueError("Expected a 4d shape [x, y, z, core]")
-  return [mesh_shape[1]*mesh_shape[2], mesh_shape[0], mesh_shape[3]]
+  return [mesh_shape[0] *
+          mesh_shape[1], mesh_shape[2], mesh_shape[3]] if FLAGS.fold_xy else [
+              mesh_shape[1] * mesh_shape[2], mesh_shape[0], mesh_shape[3]
+          ]
 
 
 def auto_logical_to_physical_tpu(logical_shape,
                                  physical_shape,
-                                 return_coordinates=False):
+                                 return_coordinates=False,
+                                 device_assignment=None):
   """Set up a mapping from logical to physical cores for TPU.
 
   We will try to set up a mapping so that allreduce operations are relatively
@@ -858,10 +867,15 @@ def auto_logical_to_physical_tpu(logical_shape,
     physical_shape: a list of integers - typically [X, Y, 1, cores]
     return_coordinates: a boolean - return a list of integer lists (coordinates)
        instead of a list of processor indices
+    device_assignment:  the tpu logical to physical device assignment
 
   Returns:
     logical_to_physical: a permutation of range(product(physical_shape)))
   """
+  # Convert physical shape to 3d
+  if len(physical_shape) == 4:
+    physical_shape = physical_shape_3d_from_topology_proto_4d(physical_shape)
+
   tf.logging.info("auto_logical_to_physical_tpu "
                   "logical_shape=%s physical_shape=%s" %
                   (logical_shape, physical_shape))
@@ -879,9 +893,8 @@ def auto_logical_to_physical_tpu(logical_shape,
     if return_coordinates:
       default = [mtf.pnum_to_processor_coordinates(i) for i in default]
     return default
-  if len(physical_shape) == 4 and physical_shape[2] == 1:
-    physical_shape = physical_shape_3d_from_topology_proto_4d(physical_shape)
-  elif len(physical_shape) != 3:
+
+  if len(physical_shape) != 3:
     tf.logging.warning("Unrecognized format for tpu physical shape")
     return _default_value()
   # physical_shape is a triple of rows, cols, cores
@@ -946,5 +959,14 @@ def auto_logical_to_physical_tpu(logical_shape,
   if return_coordinates:
     return logical_to_physical
   else:
-    return [mtf.processor_coordinates_to_pnum(physical_shape, coord)
-            for coord in logical_to_physical]
+    if FLAGS.logical_cores_per_chip > 1:
+      return [
+          mtf.processor_coordinates_to_pnum(physical_shape, coord)
+          for coord in logical_to_physical
+      ]
+    else:
+      # check device_assignment
+      if device_assignment is None:
+        raise ValueError("physical_shape or device_assignment unset")
+      return mtf.processor_coordinates_to_pnum_map_nd(
+          physical_shape, logical_to_physical, device_assignment)
