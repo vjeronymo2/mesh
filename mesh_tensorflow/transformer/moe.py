@@ -526,6 +526,8 @@ def transformer_moe_layer_v1(
     # Extra reshape reduces communication cost for model-parallel versions.
     # For model-parallel versions, this reshape causes an mtf.slice and for non-
     # model-parallel versions, this has no effect.
+    d_model_split_dim = mtf.Dimension(
+        "d_model_split", expert_output.shape[-1].size)
     expert_output = mtf.reshape(
         expert_output,
         mtf.Shape([
