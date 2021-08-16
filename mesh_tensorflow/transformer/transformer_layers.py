@@ -247,7 +247,7 @@ class SelfAttention(transformer.TransformerLayer):
           context.position, memory_length, dtype=context.activation_dtype)
       inv_one_hot = 1.0 - one_hot
       if self.shared_kv:
-        old_kv = context.get_states(1)
+        old_kv, = context.get_states(1)
         kv = old_kv * inv_one_hot + kv * one_hot
       else:
         old_k, old_v = context.get_states(2)
