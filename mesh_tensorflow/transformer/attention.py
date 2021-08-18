@@ -83,7 +83,7 @@ def attention(q,
     logits += mtf.cast(bias, logits.dtype)
 
   # Adds auxiliary z-loss to push the attention logits towards zero.
-  if z_loss_coeff is not None:
+  if z_loss_coeff is not None and context.train:
     tf.logging.info("attention z_loss being added: {}".format(
         tf.get_variable_scope().name))
     log_z = mtf.reduce_logsumexp(logits, memory_length_dim)
