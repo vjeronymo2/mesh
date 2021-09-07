@@ -98,13 +98,30 @@ class MoE1D(transformer.TransformerLayer):
         moe_top_n_num_experts_per_token=top_n_num_experts_per_token)
     self._activation = activation
 
-  def call(self, context, x, losses=None):
+  def call(self, context, x, losses=None, use_enc_nonpadding=False):
     """Call the layer."""
     if context.model.ensemble_dim:
       raise NotImplementedError("MoE not yet implemented with ensembles")
 
     has_length_dim = context.length_dim in x.shape.dims
-    if not has_length_dim:
+    has_memory_length_dim = "memory_length" in x.shape.dimension_names
+    # Used for EncDec attention if we have the MoE layer produce the kv.
+    if use_enc_nonpadding:
+      nonpadding = context.nonpadding_encoder
+    else:
+      nonpadding = context.nonpadding
+    # If a memory_length dimension exists, then we make sure the
+    # length dimension of the nonpadding tensor matches it.
+    if (has_memory_length_dim and isinstance(nonpadding, mtf.Tensor)
+        and "length" in nonpadding.shape.dimension_names):
+      old_length_dim = nonpadding.shape.get_dim_by_name("length")
+      new_length_dim = mtf.Dimension("memory_length", old_length_dim.size)
+      nonpadding = mtf.replace_dimensions(
+          nonpadding, old_length_dim, new_length_dim)
+    # Insert a length dimension if one does not exist.
+    # Typically no length dims will occur on the decoder during autoregressive
+    # decoding.
+    if not has_length_dim and not has_memory_length_dim:
       x_shape = x.shape
       shape_with_length = mtf.Shape(
           x_shape.dims[:-1] + [mtf.Dimension("length", 1)]
@@ -124,18 +141,21 @@ class MoE1D(transformer.TransformerLayer):
         context.variable_dtype,
         layout=context.model.layout,
         mesh_shape=context.model.mesh_shape,
-        nonpadding=context.nonpadding,
+        nonpadding=nonpadding,
         activation=self._activation,
         num_microbatches=context.num_microbatches,
         token_embeddings=context.input_embeddings)
     if context.losses is not None:
       context.losses.append(loss)
-    if not has_length_dim:
+    if not has_length_dim and not has_memory_length_dim:
+      # Shapes will differ if the input and output dimension of the layer do not
+      # match.
+      new_y_shape = mtf.Shape(x_shape.dims[:-1] + [output_dim])
       if self._hparams.moe_use_experts_attention:
-        y_reshape = [mtf.reshape(y_out, x_shape) for y_out in y]
+        y_reshape = [mtf.reshape(y_out, new_y_shape) for y_out in y]
         y = y_reshape
       else:
-        y = mtf.reshape(y, x_shape)
+        y = mtf.reshape(y, new_y_shape)
     return y
 
 

@@ -304,6 +304,17 @@ class Context(object):
       return mtf.cast(
           mtf.not_equal(self.sequence_id, 0), self.activation_dtype)
 
+  @property
+  def nonpadding_encoder(self):
+    """Tensor with zeros in padding positions and ones elsewhere for encoder."""
+    if self.encoder_sequence_id is None:
+      return None
+    if self.encoder_sequence_id == 1:
+      return 1
+    else:
+      return mtf.cast(
+          mtf.not_equal(self.encoder_sequence_id, 0), self.activation_dtype)
+
   def get_position(self):
     if self.position_is_default:
       return mtf.range(self.mesh, self.length_dim, tf.int32)
