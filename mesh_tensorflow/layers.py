@@ -947,6 +947,39 @@ def conv3d_transpose_with_blocks(
       variable_dtype, name)
 
 
+def corr(x, dim, epsilon=1e-20, name="pearson_correlation"):
+  """Compute correlation along dimension dim, equiv to tfp.stats.correlation.
+
+  It treats the dim Dimension as the random event axis, and all the other dims
+  as the sample axis. Pearson correlation is computed between random events in
+  dim Dimension, and marginalized over the other dims.
+
+  Example usage:
+    inputs = tf.random_normal([batch, channels])
+    mtf_inputs = mtf.import_tf_tensor(
+        mesh, inputs, shape=mtf.Shape([batch_dim, channels_dim]))
+    correlation = corr(mtf_inputs, dim=channels_dim)
+
+  Args:
+    x: a mtf.Tensor whose shape contains dim.
+    dim: a mtf.Dimension.
+    epsilon: a small floating point number for numerical stability.
+    name: a string used for tf.variable_scope.
+
+  Returns:
+    a mtf.Tensor with the shape of [dim, dim].
+  """
+  with tf.variable_scope(name):
+    mean = mtf.reduce_mean(x, output_shape=[dim])
+    dim_name = dim.name
+    x1 = mtf.rename_dimension(x - mean, dim_name, f"{dim_name}_1")
+    x2 = mtf.rename_dimension(x - mean, dim_name, f"{dim_name}_2")
+    variance = lambda z: mtf.sqrt(  # pylint: disable=g-long-lambda
+        mtf.reduce_sum(mtf.square(z), output_shape=z.shape.dims[-1:])) + epsilon
+    v1, v2 = variance(x1), variance(x2)
+    return mtf.matmul(x1, x2) / mtf.matmul(v1, v2)
+
+
 def layer_norm(x, dim, epsilon=1e-6, name="layer_prepostprocess"):
   """Layer normalization over dimension dim.
 

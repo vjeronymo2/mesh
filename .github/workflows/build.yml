@@ -14,7 +14,7 @@ jobs:
     - name: Install dependencies
       run: |
         pip install tf-nightly mock pytest
-        pip install -e .[auto_mtf,transformer]
+        pip install -e .[test,auto_mtf,transformer]
     - name: Test with pytest
       run: pytest
     # The below step just reports the success or failure of tests as a "commit status".

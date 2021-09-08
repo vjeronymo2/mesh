@@ -27,6 +27,7 @@ setup(
         'auto_mtf': ['ortools'],
         'tensorflow': ['tensorflow>=1.15.0'],
         'transformer': ['tensorflow-datasets', 'scipy'],
+        'test': ['tensorflow_probability']
     },
     tests_require=[
         'ortools',
