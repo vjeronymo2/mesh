@@ -410,7 +410,6 @@ class ExpertsSelfAttention(SelfAttention):
                **kwargs):
     super(ExpertsSelfAttention, self).__init__(**kwargs)
     self.expert_computation = expert_computation
-    self.is_encdec = False  # Overrided in ExpertsEncDecAttention
     self._hparams = mtf.transformer.moe.HParams(
         moe_gating=moe_gating,
         num_experts=num_experts,
@@ -466,8 +465,7 @@ class ExpertsSelfAttention(SelfAttention):
         fold_scaling_into_initializer=self.fold_scaling_into_initializer,
         context=context,
         experts_hparams=self._hparams,
-        expert_computation=self.expert_computation,
-        is_encdec=self.is_encdec)
+        expert_computation=self.expert_computation)
 
 
 @gin.configurable
@@ -477,10 +475,6 @@ class ExpertsEncDecAttention(ExpertsSelfAttention):
   def __init__(self, relative_attention_type=None, **kwargs):
     super(ExpertsEncDecAttention, self).__init__(
         relative_attention_type=relative_attention_type, **kwargs)
-    self.is_encdec = True
-    if self.expert_computation == "qkv":
-      raise ValueError("ExpertsEncDecAttention must use expert_computation of "
-                       "q or kv.")
 
   def _get_memory_antecedent(self, context):
     return context.encoder_output

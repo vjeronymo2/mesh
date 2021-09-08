@@ -631,11 +631,10 @@ class ExpertsAttentionParams(AttentionParams):
                combine_dims=True,
                ensemble_dim=None,
                keep_query_heads_dims=False,
-               fold_scaling_into_initializer=False,
+               fold_scaling_into_initializer=True,
                context=None,
                experts_hparams=None,
-               expert_computation="qkv",
-               is_encdec=False):
+               expert_computation="qkv"):
     super(ExpertsAttentionParams, self).__init__(
         mesh=mesh,
         query_input_dim=query_input_dim,
@@ -656,7 +655,6 @@ class ExpertsAttentionParams(AttentionParams):
 
     self.context = context
     self.expert_computation = expert_computation
-    self.is_encdec = is_encdec
 
     # Unless we want to compute both q and kv, we can use the normal MoE
     # settings.
@@ -698,6 +696,9 @@ class ExpertsAttentionParams(AttentionParams):
     # we want to partition both "experts_hidden" and "heads".
     moe_output_dims = mtf.Dimension("d_model", self.q_shape[-1].size)
 
+    tf.logging.info("ExpertsAttention moe_hidden_size: {}".format(
+        experts_hparams.hidden_size))
+    tf.logging.info("moe_output_dims: {}".format(moe_output_dims))
     self.moe_layer = mtf.transformer.moe.MoE1D(
         moe_gating=experts_hparams.moe_gating,
         num_experts=experts_hparams.num_experts,
@@ -718,70 +719,55 @@ class ExpertsAttentionParams(AttentionParams):
         activation=experts_hparams.activation,
         z_loss=experts_hparams.z_loss)
 
-  def _replace_d_model_dim(self, t):
-    """Used to replace the `d_model` dim with `heads`."""
-    new_last_dim = mtf.Dimension(self.q_shape[-1].name, t.shape[-1].size)
-    return mtf.reshape(t, new_shape=mtf.Shape(t.shape[:-1] + [new_last_dim]))
-
-  def _compute_q_with_experts(self, antecedent):
-    q = self.moe_layer.call(self.context, antecedent)
-    q = self._replace_d_model_dim(q)
-    return q
-
-  def _compute_kv_with_experts(self, antecedent):
-    kv = self.moe_layer.call(
-        self.context, antecedent, use_enc_nonpadding=self.is_encdec)
-    kv = self._replace_d_model_dim(kv)
-    return kv
-
   def _compute_merge_qkv(self, antecedent):
     """Computes qkv all in one call using MoE layer."""
-    # This mode assumes query and memory antecedent are the same.
-    qkv = self.moe_layer.call(self.context, antecedent)
-    q, kv = qkv
-    q = self._replace_d_model_dim(q)
-    kv = self._replace_d_model_dim(kv)
-    self._q = q
-    self._kv = kv
+    def _replace_d_model_dim(t):
+      """Used to replace the `d_model` dim with `heads`."""
+      new_last_dim = mtf.Dimension(self.q_shape[-1].name, t.shape[-1].size)
+      return mtf.reshape(
+          t, new_shape=mtf.Shape(t.shape[:-1] + [new_last_dim]))
+    if self.expert_computation == "qkv":
+      # NOTE: This assumes querty and memory antecedent are the same
+      qk = self.moe_layer.call(self.context, antecedent)
+      # Split qk here since they went through experts-layers
+      q, k = qk
+      q = _replace_d_model_dim(q)
+      k = _replace_d_model_dim(k)
+    elif self.expert_computation == "q":
+      q = self.moe_layer.call(self.context, antecedent)
+      q = _replace_d_model_dim(q)
+      # Compute key/value normally
+      k = mtf.layers.us_einsum(
+          [antecedent, self.wkv], reduced_dims=[self.memory_input_dim])
+    elif self.expert_computation == "kv":
+      k = self.moe_layer.call(self.context, antecedent)
+      k = _replace_d_model_dim(k)
+      # Compute query normally
+      q = mtf.layers.us_einsum(
+          [antecedent, self.wq], reduced_dims=[self.query_input_dim])
+    else:
+      raise ValueError("Invalid expert computation mode: {}".format(
+          self.expert_computation))
+
+    # Scale query
+    q *= self.key_dim.size ** -0.5
+    self._q = mtf.replace_dimensions(q, q.shape.dims[-1], self.q_dims)
+    self._k = mtf.replace_dimensions(k, k.shape.dims[-1], self.k_dims)
 
   def compute_q(self, query_antecedent):
-    if self.expert_computation == "qkv":
-      self._compute_merge_qkv(query_antecedent)
-      q = self._q
-    elif self.expert_computation == "q":
-      q = self._compute_q_with_experts(query_antecedent)
-    # If computing "kv" with experts, then compute q normally.
-    elif self.expert_computation == "kv":
-      q = mtf.layers.us_einsum(
-          [query_antecedent, self.wq], reduced_dims=[self.query_input_dim])
-    q *= self.key_dim.size ** -0.5
-    return mtf.replace_dimensions(q, q.shape.dims[-1], self.q_dims)
+    self._compute_merge_qkv(query_antecedent)
+    return self._q
 
   def compute_k(self, memory_antecedent):
-    raise NotImplementedError("ExpertsAttention uses shared_kv = True.")
+    del memory_antecedent
+    return self._k
 
   def compute_kv(self, memory_antecedent):
-    if self.expert_computation == "qkv":
-      # We have already computing "kv" with "q", so just return its value.
-      kv = self._kv
-      # Check if the "length" dimension should be "memory_length" since both
-      # q and kv were computed using the same antecedent. This is why we must
-      # always have the same query and memory antecedent for the qkv mode.
-      if self.context.length_dim in kv.shape.dims:
-        memory_length = mtf.Dimension(
-            "memory_length", self.context.length_dim.size)
-        kv = mtf.replace_dimensions(
-            kv, self.context.length_dim, memory_length)
-    # If computing "q" with experts, then compute "kv" normally.
-    elif self.expert_computation == "q":
-      kv = mtf.layers.us_einsum(
-          [memory_antecedent, self.wkv], reduced_dims=[self.memory_input_dim])
-    elif self.expert_computation == "kv":
-      kv = self._compute_kv_with_experts(memory_antecedent)
-    kv = mtf.replace_dimensions(kv, kv.shape.dims[-1], self.k_dims)
-    return kv
+    del memory_antecedent
+    return self._k
 
   def compute_v(self, memory_antecedent):
+    del memory_antecedent
     raise NotImplementedError("ExpertsAttention uses shared_kv = True.")
 
 
