@@ -1921,6 +1921,11 @@ def relu(x, name="relu"):
   return cwise(tf.nn.relu, [x], name=name, grad_function=_relu_grad)
 
 
+def squared_relu(x, name="squared_relu"):
+  """Squared ReLU from Primer paper (TODO(davidso):Link when released)."""
+  return cwise(lambda t: square(relu(t)), [x], name=name)
+
+
 def leaky_relu(x, alpha=0.2, name="leaky_relu"):
   def forward_function(x):
     return tf.nn.leaky_relu(x, alpha)
