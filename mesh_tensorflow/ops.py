@@ -1922,7 +1922,7 @@ def relu(x, name="relu"):
 
 
 def squared_relu(x):
-  """Squared ReLU from Primer paper (TODO(davidso):Link when released)."""
+  """Squared ReLU from Primer paper: https://arxiv.org/abs/2109.08668."""
   return square(relu(x))
 
 
