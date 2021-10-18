@@ -1796,9 +1796,11 @@ def _top_n_gating(
     gates.append(gate_n)
     masks.append(mask_n)
     indexes.append(index_n)
-  denom = mtf.add_n(gates) + 1e-9
-  # All gates probs are normalized over the top-n tokens.
-  gates = [gate / denom for gate in gates]
+
+  if len(gates) > 1:
+    # All gates probs are normalized over the top-n tokens.
+    denom = mtf.add_n(gates) + 1e-9
+    gates = [gate / denom for gate in gates]
 
   # BALANCING LOSSES
   # shape = [batch, experts]
