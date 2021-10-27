@@ -151,7 +151,8 @@ def constant(step, total_train_steps, value=1.0):
 def constant_learning_rate(step, total_train_steps, learning_rate=gin.REQUIRED):
   """Learning rate independent of step.
 
-  DEPRECATED: use constant() or pass a float directly to utils.run.learning_rate
+  DEPRECATED: use constant() or pass a float directly to
+  utils.run.learning_rate_schedule.
 
   Args:
     step: a tf.Scalar
