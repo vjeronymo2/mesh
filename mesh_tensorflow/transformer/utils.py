@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2021 The Mesh TensorFlow Authors.
+# Copyright 2022 The Mesh TensorFlow Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -1847,7 +1847,7 @@ def _maybe_add_pretokenized_features(examples, vocabulary):
         if not added_pretokenized[feature_name]:
           added_pretokenized[feature_name] = True
           tf.logging.warning(
-              "Feature '%s' is being approximated by decoding from the"
+              "Feature '%s' is being approximated by decoding from the "
               "tokenized feature '%s.'",
               pretokenized_feature_name, feature_name)
   return examples
