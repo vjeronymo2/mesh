@@ -522,7 +522,9 @@ def tpu_estimator_model_fn(model_type,
                            ensemble_inputs=None,
                            mesh_devices=None,
                            model_info_file=None,
-                           hierarchical_tiling_spec=None):
+                           hierarchical_tiling_spec=None,
+                           weight_decay_checkpoint=None  # GOOGLE-INTERNAL,
+                           ):
   """Create a TPUEstimator model function.
 
   Args:
@@ -564,7 +566,7 @@ def tpu_estimator_model_fn(model_type,
       if empty string (default), all variables from the checkpoint are loaded.
     ensemble_inputs: an optional integer - pass the size of the ensemble to
       train an ensemble where each model gets different inputs.
-      You also need to configure Unitransformer.ensemble  to the right size.
+      You also need to configure Unitransformer.ensemble to the right size.
       If None, then all models are trained on the same inputs.
     mesh_devices: a list of strings, the device names to use for each mesh
       slice. Only required for GPU.
@@ -572,6 +574,9 @@ def tpu_estimator_model_fn(model_type,
       operations will be logged to this file during the TRAIN mode.
     hierarchical_tiling_spec: an optional list that can be passed as the
       spec argument to simd_mesh_impl.HierarchicalTiling
+    weight_decay_checkpoint: an optional checkpoint dir to weight decay from.  #
+      GOOGE-INTERNAL
+
   Returns:
     a function to be passed to TPUEstimator
   """
@@ -663,7 +668,7 @@ def tpu_estimator_model_fn(model_type,
       x = tf.cast(features[key], tf.int32)
       x = tf.reshape(x, feature_shape.to_integer_list)
       if not use_tpu:
-        tf.logging.info("feature %s : %s" % (key, x))
+        tf.logging.info("feature %s : %s", key, x)
       mtf_features[key] = mtf.import_fully_replicated(
           mesh, x, feature_shape, name=key)
 
@@ -886,6 +891,7 @@ def tpu_estimator_model_fn(model_type,
         var_grads = mtf.gradients(
             [loss], [v.outputs[0] for v in graph.trainable_variables])
 
+
       if tpu_summaries:
         mtf.scalar_summary("loss", loss)
 
@@ -919,11 +925,8 @@ def tpu_estimator_model_fn(model_type,
         tf.logging.info("Variables not being trained:")
         tf.logging.info([v.name for v in graph.trainable_variables
                          if not variable_filter_fn(v)])
-
-      update_ops = optimizer(learning_rate=learning_rate).apply_grads(
-          trainable_var_grads, trainable_vars
-      )
-
+      opt = optimizer(learning_rate=learning_rate)
+      update_ops = opt.apply_grads(trainable_var_grads, trainable_vars)
       lowering = mtf.Lowering(
           graph, {mesh: mesh_impl},
           autostack=autostack,
@@ -979,6 +982,7 @@ def tpu_estimator_model_fn(model_type,
               init_checkpoint,
               {init_checkpoint_variable_mapping(v): v for v in restore_vars}
           )
+
 
         # Copy master variables to slices. Must be called first.
         restore_hook = mtf.MtfRestoreHook(lowering)
@@ -1348,8 +1352,8 @@ def decode(estimator,
     yield output_string
     if i & (i - 1) == 0:
       # LOG every power of 2.
-      tf.logging.info("decoded {}: {}".format(i, input_string))
-      tf.logging.info("            -> {}".format(output_string))
+      tf.logging.info("decoded %s: %s", i, input_string)
+      tf.logging.info("            -> %s", output_string)
 
 
 @gin.configurable
@@ -1681,7 +1685,7 @@ def save_scores_to_tfrecords(
     inputs = [r.split(" ", 1)[0] for r in inputs]
 
   table_path = "{}_{}.tfrecord".format(scores_filename, shard_idx)
-  tf.logging.info("Saving results to {}".format(table_path))
+  tf.logging.info("Saving results to %s", table_path)
 
   with tf.io.TFRecordWriter(table_path) as file_writer:
     for input_, target, score in zip(inputs, targets, scores):
@@ -1769,12 +1773,10 @@ def score_with_estimator_lazy(
     num_shards = math.ceil(num_examples / num_examples_per_shard)
   else:
     num_shards = None
-  tf.logging.info(
-      "Scoring {} examples with {} shards at {} examples per shard".format(
-          num_examples, num_shards, num_examples_per_shard))
+  tf.logging.info("Scoring %s examples with %s shards at %s examples per shard",
+                  num_examples, num_shards, num_examples_per_shard)
 
-  checkpoint_path, = get_checkpoint_iterator(
-      eval_checkpoint_step, model_dir)
+  checkpoint_path, = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
   result_iter = estimator.predict(input_fn, checkpoint_path=checkpoint_path)
 
   start = time.time()
@@ -1794,9 +1796,8 @@ def score_with_estimator_lazy(
       score_postprocess_fn(results, vocabulary, shard_idx=shard_idx)
 
       elapsed = time.time() - start
-      tf.logging.info(
-          "Scored {} results in {} s, {} examples/s for shard {}".format(
-              num_results, elapsed, num_results / elapsed, shard_idx))
+      tf.logging.info("Scored %s results in %s s, %s examples/s for shard %s",
+                      num_results, elapsed, num_results / elapsed, shard_idx)
 
       results = []
       shard_idx += 1
@@ -2379,7 +2380,7 @@ def eval_model(estimator,
 
   checkpoint_paths = get_checkpoint_iterator(eval_checkpoint_step, model_dir)
   for checkpoint_path in checkpoint_paths:
-    tf.logging.info("Checkpoint path %s" % checkpoint_path)
+    tf.logging.info("Checkpoint path %s", checkpoint_path)
     global_step = int(get_step_from_checkpoint_path(checkpoint_path))
     if eval_with_score:
       outputs, _ = score_with_estimator_fn(
@@ -2907,15 +2908,15 @@ def run(tpu_job_name,
     learning_rate_schedule = functools.partial(
         learning_rate_schedule, total_train_steps=total_run_steps)
 
-  tf.logging.info("model_type=%s" % model_type,)
-  tf.logging.info("mode=%s" % mode,)
-  tf.logging.info("sequence_length=%s" % sequence_length,)
-  tf.logging.info("batch_size=%s" % batch_size,)
-  tf.logging.info("train_steps=%s" % train_steps,)
+  tf.logging.info("model_type=%s", model_type,)
+  tf.logging.info("mode=%s", mode,)
+  tf.logging.info("sequence_length=%s", sequence_length,)
+  tf.logging.info("batch_size=%s", batch_size,)
+  tf.logging.info("train_steps=%s", train_steps,)
   if total_run_steps is not None:
-    tf.logging.info("total_run_steps=%s" % total_run_steps,)
-  tf.logging.info("mesh_shape=%s" % mesh_shape,)
-  tf.logging.info("layout_rules=%s" % layout_rules,)
+    tf.logging.info("total_run_steps=%s", total_run_steps,)
+  tf.logging.info("mesh_shape=%s", mesh_shape,)
+  tf.logging.info("layout_rules=%s", layout_rules,)
 
   if mode == "train" and dataset_split != "train":
     raise ValueError("mode==\"train\" requires dataset_split==\"train\"")
@@ -2929,9 +2930,7 @@ def run(tpu_job_name,
   cluster = tf.distribute.cluster_resolver.TPUClusterResolver(
       tpu, zone=tpu_zone, project=gcp_project) if tpu else None
 
-  tf.logging.info(
-      "Building TPUConfig with tpu_job_name={}".format(tpu_job_name)
-  )
+  tf.logging.info("Building TPUConfig with tpu_job_name=%s", tpu_job_name)
 
   score_in_predict_mode = "score" in mode
   estimator_fn = functools.partial(

@@ -89,7 +89,7 @@ class SgdOptimizer(Optimizer):
 
   def apply_grad(self, grad, var):
     if grad is None:
-      tf.logging.warning("Gradient is None for variable %s" % var.name)
+      tf.logging.warning("Gradient is None for variable %s", var.name)
       return []
     # It is critical to use assign_sub instead of mtf.assign(var - ...)
     #  for the case of bfloat16 activations, so as to avoid repeatedly rounding
@@ -115,7 +115,7 @@ class MomentumOptimizer(Optimizer):
 
   def apply_grad(self, grad, var):
     if grad is None:
-      tf.logging.warning("Gradient is None for variable %s" % var.name)
+      tf.logging.warning("Gradient is None for variable %s", var.name)
       return []
 
     updates = []
@@ -153,7 +153,7 @@ class AdamWeightDecayOptimizer(Optimizer):
   def apply_grad(self, grad, var):
     """See base class."""
     if grad is None:
-      tf.logging.warning("Gradient is None for variable %s" % var.name)
+      tf.logging.warning("Gradient is None for variable %s", var.name)
       return []
     grad = mtf.to_float(grad)
 
@@ -219,7 +219,8 @@ class AdafactorOptimizer(Optimizer):
                epsilon2=1e-3,
                min_dim_size_to_factor=128,
                stacked_dim_names=None,
-               exclude_from_parameter_scale=None):
+               exclude_from_parameter_scale=None,
+               ):
     """Construct a new Adafactor optimizer.
 
     See class comment.
@@ -306,7 +307,7 @@ class AdafactorOptimizer(Optimizer):
 
   def apply_grad(self, grad, var):
     if grad is None:
-      tf.logging.warning("Gradient is None for variable %s" % var.name)
+      tf.logging.warning("Gradient is None for variable %s", var.name)
       return []
     # create slots
     grad = mtf.to_float(grad)
