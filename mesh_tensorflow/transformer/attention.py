@@ -1001,3 +1001,317 @@ def maybe_reshape_attention_input_for_2d_sharding(
     else:
       return x
   return _my_reshape(q), _my_reshape(k), _my_reshape(v), _my_reshape(bias)
+
+
+def make_params_mtlprompt(task_num,
+                          num_heads,
+                          prefix_hidden_dim,
+                          kv_dim,
+                          context,
+                          mtlprompt_share,
+                          dropout_rate,
+                          prompt_length=None):
+  """Returns the parameters for MTL-Prompt mode."""
+
+  tf.logging.info("MTL-Prompt mode is ON!")
+  # Get task ids for the batch from the context cache.
+  task_id = context.cache["task-id"]
+
+  # Remove length dim from shape [batch_size, length] -> [batch_size].
+  task_id = mtf.reshape(task_id, task_id.shape - task_id.shape.dims[-1])
+  batch_size_dim = task_id.shape.get_dim_by_name("batch")
+
+  task_num_dim = mtf.Dimension("task_num", task_num)
+  prompt_length_dim = mtf.Dimension("memory_length", prompt_length)
+  heads_dim = mtf.Dimension("heads", num_heads)
+  prefix_hidden_dim = mtf.Dimension("prefix_hidden", prefix_hidden_dim)
+
+  with tf.variable_scope("prompt"):
+    # Initialize projection network matrices.
+
+    # MTL-Prompt-Share mode.
+    hidden_shape = [context.model.model_dim, prefix_hidden_dim]
+    scratch_shape = [prefix_hidden_dim, heads_dim, kv_dim]
+    if not mtlprompt_share:
+      # MTL-Prompt-Sep mode.
+      hidden_shape = [task_num_dim] + hidden_shape
+      scratch_shape = [task_num_dim] + scratch_shape
+
+    w_k_up = mtf.get_variable(
+        context.mesh,
+        "w_k_up",
+        mtf.Shape(hidden_shape),
+        dtype=context.variable_dtype)
+    w_k_down = mtf.get_variable(
+        context.mesh,
+        "w_k_down",
+        mtf.Shape(scratch_shape),
+        dtype=context.variable_dtype)
+    w_v_up = mtf.get_variable(
+        context.mesh,
+        "w_v_up",
+        mtf.Shape(hidden_shape),
+        dtype=context.variable_dtype)
+    w_v_down = mtf.get_variable(
+        context.mesh,
+        "w_v_down",
+        mtf.Shape(scratch_shape),
+        dtype=context.variable_dtype)
+
+  scope_name = tf.get_variable_scope().name
+  scope = scope_name.split("/")[0]
+  prompts = context.shared_params[scope]["prompts"]
+  prompts = mtf.layers.layer_norm(
+      prompts, dim=context.model.model_dim, name="prompts_layernorm")
+  if context.train and dropout_rate != 0.0:
+    prompts = mtf.dropout(prompts, context.train, 1.0 - dropout_rate)
+
+  prompts_k_hidden = mtf.matmul(
+      prompts,
+      w_k_up,
+      output_shape=[task_num_dim, prompt_length_dim, prefix_hidden_dim],
+      reduced_dims=[context.model.model_dim])
+  prompts_k_hidden = mtf.relu(prompts_k_hidden)
+  if context.train and dropout_rate != 0.0:
+    prompts_k_hidden = mtf.dropout(
+        prompts_k_hidden, context.train, keep_prob=1.0 - dropout_rate)
+  prompts_k = mtf.matmul(
+      prompts_k_hidden,
+      w_k_down,
+      output_shape=[task_num_dim, prompt_length_dim, heads_dim, kv_dim],
+      reduced_dims=[prefix_hidden_dim])
+
+  prompts_v_hidden = mtf.matmul(
+      prompts,
+      w_v_up,
+      output_shape=[task_num_dim, prompt_length_dim, prefix_hidden_dim],
+      reduced_dims=[context.model.model_dim])
+  prompts_v_hidden = mtf.relu(prompts_v_hidden)
+  if context.train and dropout_rate != 0.0:
+    prompts_v_hidden = mtf.dropout(
+        prompts_v_hidden, context.train, keep_prob=1.0 - dropout_rate)
+  prompts_v = mtf.matmul(
+      prompts_v_hidden,
+      w_v_down,
+      output_shape=[task_num_dim, prompt_length_dim, heads_dim, kv_dim],
+      reduced_dims=[prefix_hidden_dim])
+
+  prompts_batch_k = mtf.gather(
+      prompts_k,
+      task_id,
+      task_num_dim,
+      output_shape=[batch_size_dim, prompt_length_dim, heads_dim, kv_dim])
+  prompts_batch_v = mtf.gather(
+      prompts_v,
+      task_id,
+      task_num_dim,
+      output_shape=[batch_size_dim, prompt_length_dim, heads_dim, kv_dim])
+  return prompts_batch_k, prompts_batch_v
+
+
+def make_params_hyperprompt(task_num,
+                            num_heads,
+                            prefix_hidden_dim,
+                            kv_dim,
+                            context,
+                            mtlprompt_share,
+                            dropout_rate,
+                            prompt_length,
+                            scope=None):
+  """Returns the parameters for HyperPrompt mode."""
+  del mtlprompt_share
+  tf.logging.info("HyperPrompt mode is ON!")
+  # Get task ids for the batch from the context cache.
+  task_id = context.cache["task-id"]
+
+  # Remove length dim from shape [batch_size, length].
+  task_id = mtf.reshape(task_id, task_id.shape - task_id.shape.dims[-1])
+
+  batch_size_dim = [dim for dim in task_id.shape.dims if dim.name == "batch"][0]
+
+  task_num_dim = mtf.Dimension("task_num", task_num)
+  prompt_length_dim = mtf.Dimension("memory_length", prompt_length)
+  heads_dim = mtf.Dimension("heads", num_heads)
+  prefix_hidden_dim = mtf.Dimension("prefix_hidden", prefix_hidden_dim)
+
+  prompts = context.shared_params[scope]["prompts"]
+  prompts = mtf.layers.layer_norm(
+      prompts, dim=context.model.model_dim, name="prompts_layernorm")
+  if context.train and dropout_rate != 0.0:
+    prompts = mtf.dropout(prompts, context.train, 1.0 - dropout_rate)
+
+  scope_name = tf.get_variable_scope().name
+  scope = scope_name.split("/")[0]
+
+  # Get the layer id.
+  layer_id = int(scope_name.split("/")[1].split("_")[1])
+
+  task_raw_embeddings = context.shared_params[scope]["task_raw_embedding"]
+  task_raw_embedding_dim = task_raw_embeddings.shape.dims[1]
+
+  task_projector_layer_one = context.shared_params[scope][
+      "task_projector_layer_one"]
+  task_projector_layer_one_in_dim = task_projector_layer_one.shape.dims[0]
+  task_hidden_dim = task_projector_layer_one.shape.dims[1]
+
+  task_projector_layer_two = context.shared_params[scope][
+      "task_projector_layer_two"]
+  task_final_embedding_dim = task_projector_layer_two.shape.dims[1]
+
+  layer_id_embeddings = context.shared_params[scope]["layer_embedding"]
+  layer_num_dim = layer_id_embeddings.shape.dims[0]
+  layer_id_embedding_dim = layer_id_embeddings.shape.dims[1]
+
+  # Get the layer id embedding for the batch.
+  if layer_id not in range(0, layer_num_dim.size):
+    raise ValueError("encounter errors in parsing scope get layer_id.")
+  layer_id_task_num = mtf.constant(
+      task_raw_embeddings.mesh,
+      layer_id,
+      shape=mtf.Shape([task_num_dim]),
+      dtype=tf.int32)
+  layer_id_emb_task_num = mtf.gather(
+      layer_id_embeddings,
+      layer_id_task_num,
+      layer_num_dim,
+      output_shape=[task_num_dim, layer_id_embedding_dim])
+
+  task_embeddings_concat = mtf.concat(
+      [task_raw_embeddings, layer_id_emb_task_num],
+      concat_dim_name=task_raw_embedding_dim.name)
+
+  # Feed raw task-embedding to MLP to obtain the layer-aware task embedding.
+  task_embeddings_concat_hidden = mtf.matmul(
+      task_embeddings_concat,
+      task_projector_layer_one,
+      output_shape=[task_num_dim, task_hidden_dim],
+      reduced_dims=[task_projector_layer_one_in_dim])
+  task_embeddings_concat_hidden_relu = mtf.relu(task_embeddings_concat_hidden)
+
+  if context.train and dropout_rate != 0.0:
+    task_embeddings_concat_hidden_relu = mtf.dropout(
+        task_embeddings_concat_hidden_relu,
+        context.train,
+        keep_prob=1.0 - dropout_rate)
+
+  task_embeddings_layer_awared = mtf.matmul(
+      task_embeddings_concat_hidden_relu,
+      task_projector_layer_two,
+      output_shape=[task_num_dim, task_final_embedding_dim],
+      reduced_dims=[task_hidden_dim])
+
+  task_embeddings_layer_awared = mtf.layers.layer_norm(
+      task_embeddings_layer_awared,
+      dim=task_final_embedding_dim,
+      name="prompt_task_embed_layernorm")
+
+  hypernet_w_k_up = context.shared_params[scope]["hypernet_w_k_up"]
+  hypernet_w_k_down = context.shared_params[scope]["hypernet_w_k_down"]
+  hypernet_w_v_up = context.shared_params[scope]["hypernet_w_v_up"]
+  hypernet_w_v_down = context.shared_params[scope]["hypernet_w_v_down"]
+
+  # Hypernetwork generates the prompts transformation
+  w_k_up = mtf.matmul(
+      task_embeddings_layer_awared,
+      hypernet_w_k_up,
+      output_shape=[task_num_dim, context.model.model_dim, prefix_hidden_dim],
+      reduced_dims=[task_final_embedding_dim])
+
+  w_k_down = mtf.matmul(
+      task_embeddings_layer_awared,
+      hypernet_w_k_down,
+      output_shape=[task_num_dim, prefix_hidden_dim, heads_dim, kv_dim],
+      reduced_dims=[task_final_embedding_dim])
+
+  w_v_up = mtf.matmul(
+      task_embeddings_layer_awared,
+      hypernet_w_v_up,
+      output_shape=[task_num_dim, context.model.model_dim, prefix_hidden_dim],
+      reduced_dims=[task_final_embedding_dim])
+
+  w_v_down = mtf.matmul(
+      task_embeddings_layer_awared,
+      hypernet_w_v_down,
+      output_shape=[task_num_dim, prefix_hidden_dim, heads_dim, kv_dim],
+      reduced_dims=[task_final_embedding_dim])
+
+  prompts_k_hidden = mtf.matmul(
+      prompts,
+      w_k_up,
+      output_shape=[task_num_dim, prompt_length_dim, prefix_hidden_dim],
+      reduced_dims=[context.model.model_dim])
+  prompts_k_hidden = mtf.relu(prompts_k_hidden)
+  if context.train and dropout_rate != 0.0:
+    prompts_k_hidden = mtf.dropout(
+        prompts_k_hidden, context.train, keep_prob=1.0 - dropout_rate)
+  prompts_k = mtf.matmul(
+      prompts_k_hidden,
+      w_k_down,
+      output_shape=[task_num_dim, prompt_length_dim, heads_dim, kv_dim],
+      reduced_dims=[prefix_hidden_dim])
+  prompts_batch_k = mtf.gather(
+      prompts_k,
+      task_id,
+      task_num_dim,
+      output_shape=[batch_size_dim, prompt_length_dim, heads_dim, kv_dim])
+
+  prompts_v_hidden = mtf.matmul(
+      prompts,
+      w_v_up,
+      output_shape=[task_num_dim, prompt_length_dim, prefix_hidden_dim],
+      reduced_dims=[context.model.model_dim])
+  prompts_v_hidden = mtf.relu(prompts_v_hidden)
+  if context.train and dropout_rate != 0.0:
+    prompts_v_hidden = mtf.dropout(
+        prompts_v_hidden, context.train, keep_prob=1.0 - dropout_rate)
+  prompts_v = mtf.matmul(
+      prompts_v_hidden,
+      w_v_down,
+      output_shape=[task_num_dim, prompt_length_dim, heads_dim, kv_dim],
+      reduced_dims=[prefix_hidden_dim])
+  prompts_batch_v = mtf.gather(
+      prompts_v,
+      task_id,
+      task_num_dim,
+      output_shape=[batch_size_dim, prompt_length_dim, heads_dim, kv_dim])
+
+  return prompts_batch_k, prompts_batch_v
+
+
+def concat_hyper_prompts_kv(k, v, scope_encoder_or_decoder, use_hyperprompt,
+                            memory_length, task_num, num_heads,
+                            prefix_hidden_dim, kv_dim, context, mtlprompt_share,
+                            dropout_rate, prompt_length):
+  """Performs the concatenation of hyper prompts to key and value."""
+  # Inject hyper-prompts into keys and values.
+  if use_hyperprompt:
+    # HyperPrompt mode.
+    prompts_batch_k, prompts_batch_v = make_params_hyperprompt(
+        task_num,
+        num_heads,
+        prefix_hidden_dim,
+        kv_dim,
+        context,
+        mtlprompt_share,
+        dropout_rate,
+        prompt_length=prompt_length,
+        scope=scope_encoder_or_decoder)
+  else:
+    # MTL-Prompt mode.
+    prompts_batch_k, prompts_batch_v = make_params_mtlprompt(
+        task_num,
+        num_heads,
+        prefix_hidden_dim,
+        kv_dim,
+        context,
+        mtlprompt_share,
+        dropout_rate,
+        prompt_length=prompt_length)
+
+  k = mtf.concat([prompts_batch_k, k], concat_dim_name="memory_length")
+  v = mtf.concat([prompts_batch_v, v], concat_dim_name="memory_length")
+  memory_length = mtf.Dimension("memory_length",
+                                memory_length.size + prompt_length)
+  memory_position = mtf.range(context.mesh, memory_length, tf.int32)
+
+  return k, v, memory_position, memory_length

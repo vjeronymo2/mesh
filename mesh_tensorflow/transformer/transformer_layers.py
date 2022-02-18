@@ -166,7 +166,13 @@ class SelfAttention(transformer.TransformerLayer):
                combine_dims=True,
                keep_query_heads_dims=False,
                fold_scaling_into_initializer=True,
-               z_loss_coeff=None):
+               z_loss_coeff=None,
+               use_hyperprompt=False,
+               hyperprompt_mtlshare=False,
+               hyperprompt_length_encoder=None,
+               hyperprompt_length_decoder=None,
+               hyperprompt_hidden_dim=None,
+               hyperprompt_task_num=8):
     """Create a SelfAttention Layer.
 
     Args:
@@ -186,6 +192,21 @@ class SelfAttention(transformer.TransformerLayer):
       z_loss_coeff: a float, if z_loss_coeff is not None then add an auxiliary
         loss to push the attention logits closer to zero. This helps to
         stabilize model training.
+      use_hyperprompt: a boolean, whether to use hypernetwork to enable the info
+        sharing among task-prompts. Otherwise, MTL-Prompt is enabled if either
+        hyperprompt_length_encoder or hyperprompt_length_decoder is not None.
+      hyperprompt_mtlshare: a boolean, whether to share MTL-Prompt project
+        networks among tasks if MTL-Prompt is activate. Otherwise, each task has
+        its own project network (MTL-Prompt-Sep).
+      hyperprompt_length_encoder: an integer, the length of task embeddings
+        prepended to the keys and values in encoder. If it is None, prompts are
+        not prepended in the encoder.
+      hyperprompt_length_decoder: aan integer, the length of task embeddings
+        prepended to the keys and values in decoder. If it is None, prompts are
+        not prepended in the decoder.
+      hyperprompt_hidden_dim: the bottleneck dimension in MLPs to generate
+        hyper-prompts.
+      hyperprompt_task_num: an integer, # of tasks in hyperprompt mode.
     """
     self.num_heads = num_heads
     self.num_memory_heads = num_memory_heads
@@ -200,6 +221,12 @@ class SelfAttention(transformer.TransformerLayer):
     self.keep_query_heads_dims = keep_query_heads_dims
     self.fold_scaling_into_initializer = fold_scaling_into_initializer
     self.z_loss_coeff = z_loss_coeff
+    self.use_hyperprompt = use_hyperprompt
+    self.hyperprompt_mtlshare = hyperprompt_mtlshare
+    self.hyperprompt_length_encoder = hyperprompt_length_encoder
+    self.hyperprompt_length_decoder = hyperprompt_length_decoder
+    self.hyperprompt_hidden_dim = hyperprompt_hidden_dim
+    self.hyperprompt_task_num = hyperprompt_task_num
 
   def layer_output_from_attention_output(self, context, attention_output,
                                          losses):
@@ -262,11 +289,59 @@ class SelfAttention(transformer.TransformerLayer):
     if self.shared_kv:
       k = kv
       v = kv
+
+    # Inject hyper-prompts into k and v, skipped when prompt length is None.
+    scope_encoder_or_decoder = tf.get_variable_scope().name.split("/")[0]
+    use_prompt_kv = None
+    if self.hyperprompt_length_encoder and scope_encoder_or_decoder == "encoder":
+      k, v, memory_position, memory_length = attention.concat_hyper_prompts_kv(
+          k,
+          v,
+          scope_encoder_or_decoder,
+          self.use_hyperprompt,
+          memory_length,
+          self.hyperprompt_task_num,
+          self.num_heads,
+          self.hyperprompt_hidden_dim,
+          self.kv_dim,
+          context,
+          self.hyperprompt_mtlshare,
+          self.dropout_rate,
+          prompt_length=self.hyperprompt_length_encoder)
+      use_prompt_kv = "encoder_prompts"
+
+    if self.hyperprompt_length_decoder and scope_encoder_or_decoder == "decoder":
+      k, v, memory_position, memory_length = attention.concat_hyper_prompts_kv(
+          k,
+          v,
+          scope_encoder_or_decoder,
+          self.use_hyperprompt,
+          memory_length,
+          self.hyperprompt_task_num,
+          self.num_heads,
+          self.hyperprompt_hidden_dim,
+          self.kv_dim,
+          context,
+          self.hyperprompt_mtlshare,
+          self.dropout_rate,
+          prompt_length=self.hyperprompt_length_decoder)
+      use_prompt_kv = "decoder_prompts"
+
     o = self.attention_fn(
-        q, k, v, context=context, memory_length_dim=memory_length,
-        key_dim=self.kv_dim, value_dim=self.kv_dim,
-        bias=self.compute_bias(context, memory_position, x,
-                               params.query_heads_dims, q),
+        q,
+        k,
+        v,
+        context=context,
+        memory_length_dim=memory_length,
+        key_dim=self.kv_dim,
+        value_dim=self.kv_dim,
+        bias=self.compute_bias(
+            context,
+            memory_position,
+            x,
+            params.query_heads_dims,
+            q,
+            use_prompt_kv=use_prompt_kv),
         z_loss_coeff=self.z_loss_coeff,
         **self.attention_kwargs_from_context(context))
     attention_output_shape = self.expected_attention_output_shape(x, params)
@@ -275,7 +350,13 @@ class SelfAttention(transformer.TransformerLayer):
     return self.layer_output_from_attention_output(context, attention_output,
                                                    losses)
 
-  def compute_bias(self, context, memory_position, x, heads_dims, q):
+  def compute_bias(self,
+                   context,
+                   memory_position,
+                   x,
+                   heads_dims,
+                   q,
+                   use_prompt_kv=None):
     """Compute attention bias.
 
     Args:
@@ -284,6 +365,9 @@ class SelfAttention(transformer.TransformerLayer):
       x: a Tensor - the query antecedent - required for relative attention
       heads_dims: a list of dimensions
       q: a Tensor - the queries - required for contextual relative attention
+      use_prompt_kv: a string, "encoder_prompts" is to add prompts in encoder
+        "decoder_prompts" is to add prompt in decoder, which affects biases.
+
     Returns:
       a Tensor or None
     """
@@ -291,6 +375,11 @@ class SelfAttention(transformer.TransformerLayer):
     max_relative_position = self.max_relative_position(context)  # pylint: disable=assignment-from-none
     biases = []
     relative_position = memory_position - context.position
+    if use_prompt_kv == "encoder_prompts":
+      relative_position -= self.hyperprompt_length_encoder
+    elif use_prompt_kv == "decoder_prompts":
+      relative_position -= self.hyperprompt_length_decoder
+
     if min_relative_position is not None:
       visible = mtf.greater_equal(relative_position, min_relative_position)
       biases.append(attention.visibility_mask_to_attention_bias(
@@ -300,9 +389,21 @@ class SelfAttention(transformer.TransformerLayer):
       biases.append(attention.visibility_mask_to_attention_bias(
           visible, context.activation_dtype))
     if context.read_priority is not None:
-      visible = mtf.greater_equal(
-          context.read_priority,
-          mtf.layers.rename_length_to_memory_length(context.write_priority))
+      if use_prompt_kv == "decoder_prompts":
+        prompt_length_dim = mtf.Dimension(context.length_dim.name,
+                                          self.hyperprompt_length_decoder)
+        write_priority_memory = mtf.ones(
+            x.mesh, shape=[prompt_length_dim], dtype=tf.int32) * -1
+        write_priority = mtf.concat(
+            [write_priority_memory, context.write_priority],
+            concat_dim_name=context.length_dim.name)
+        visible = mtf.greater_equal(
+            context.read_priority,
+            mtf.layers.rename_length_to_memory_length(write_priority))
+      else:
+        visible = mtf.greater_equal(
+            context.read_priority,
+            mtf.layers.rename_length_to_memory_length(context.write_priority))
       biases.append(attention.visibility_mask_to_attention_bias(
           visible, context.activation_dtype))
 
@@ -315,9 +416,22 @@ class SelfAttention(transformer.TransformerLayer):
     elif isinstance(context.sequence_id, mtf.Tensor):
       sequence_id = context.sequence_id
     if (sequence_id is not None and context.length_dim in sequence_id.shape):
-      visible = mtf.equal(
-          sequence_id,
-          self.rename_length_to_memory_length(sequence_id, context))
+      if use_prompt_kv:
+        if use_prompt_kv == "decoder_prompts":
+          memory_length = mtf.Dimension(
+              "memory_length",
+              context.length_dim.size + self.hyperprompt_length_decoder)
+        elif use_prompt_kv == "encoder_prompts":
+          memory_length = mtf.Dimension(
+              "memory_length",
+              context.length_dim.size + self.hyperprompt_length_encoder)
+        memory_sequence_id = mtf.ones(
+            x.mesh, shape=[x.shape.dims[0], memory_length], dtype=tf.int32)
+        visible = mtf.equal(sequence_id, memory_sequence_id)
+      else:
+        visible = mtf.equal(
+            sequence_id,
+            self.rename_length_to_memory_length(sequence_id, context))
       biases.append(attention.visibility_mask_to_attention_bias(
           visible, context.activation_dtype))
     if self.relative_attention_type is not None:
