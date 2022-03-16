@@ -25,6 +25,7 @@ from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
+import math
 import gin
 
 import mesh_tensorflow as mtf
@@ -65,7 +66,10 @@ class MoE1D(transformer.TransformerLayer):
                word_embed_mode=None,
                use_second_place_expert_prob=None,
                use_second_place_expert_prob_temp=None,
-               top_n_num_experts_per_token=3):
+               top_n_num_experts_per_token=3,
+               rloo=False,
+               loss_type="load_balance",
+               p_dot_e=True):
     self._hparams = HParams(
         moe_gating=moe_gating,
         moe_num_experts=num_experts,
@@ -95,7 +99,10 @@ class MoE1D(transformer.TransformerLayer):
             use_second_place_expert_prob),
         moe_use_second_place_expert_prob_temp=(
             use_second_place_expert_prob_temp),
-        moe_top_n_num_experts_per_token=top_n_num_experts_per_token)
+        moe_top_n_num_experts_per_token=top_n_num_experts_per_token,
+        moe_rloo=rloo,
+        loss_type=loss_type,
+        p_dot_e=p_dot_e)
     self._activation = activation
 
   def call(self, context, x, losses=None):
@@ -127,7 +134,8 @@ class MoE1D(transformer.TransformerLayer):
         nonpadding=context.nonpadding,
         activation=self._activation,
         num_microbatches=context.num_microbatches,
-        token_embeddings=context.input_embeddings)
+        token_embeddings=context.input_embeddings,
+        context=context)
     if context.losses is not None:
       context.losses.append(loss)
     if not has_length_dim:
@@ -202,7 +210,7 @@ class MoE2D(transformer.TransformerLayer):
 def transformer_moe_layer_v1(
     inputs, output_dim, hparams, train, variable_dtype,
     layout=None, mesh_shape=None, nonpadding=None, activation=mtf.relu,
-    num_microbatches=None, token_embeddings=None):
+    num_microbatches=None, token_embeddings=None, context=None):
   """Local mixture of experts that works well on TPU.
 
   Adapted from the paper https://arxiv.org/abs/1701.06538
@@ -281,6 +289,8 @@ def transformer_moe_layer_v1(
       [batch_dim(s), length_dim, input_dim]. These are the word embeddings for
       that correspond to the inputs. These can optionally be used to make
       routing decisions.
+    context: a Context object contains extra information that layers need
+      at call time, as defined in transformer.py.
 
   Returns:
     outputs: a Tensor with shape [batch_dim(s), length_dim, output_dim]
@@ -436,7 +446,8 @@ def transformer_moe_layer_v1(
         variable_dtype=variable_dtype,
         importance=nonpadding,
         num_microbatches=num_microbatches,
-        token_embeddings=token_embeddings)
+        token_embeddings=token_embeddings,
+        context=context)
   elif hparams.moe_gating == "ntlb":
     dispatch_tensor, combine_tensor, loss = _ntlb_gating(
         inputs=inputs,
@@ -1303,7 +1314,8 @@ def _expert_selection_gating(
 def _switch_gating(
     inputs, outer_expert_dims, experts_dim, expert_capacity_dim,
     hparams, train, variable_dtype, importance=None, name="switch_gating",
-    num_microbatches=None, token_embeddings=None):
+    num_microbatches=None, token_embeddings=None,
+    context=None):
   """Compute Switch gating."""
   # SELECT EXPERT
   if train:
@@ -1351,6 +1363,11 @@ def _switch_gating(
     expert_gate = mtf.gather(raw_gates, expert_index, dim=experts_dim)
   else:
     raise ValueError("Unknown Switch gating policy %s" % policy)
+  full_expert_gate_log_probs = gate_logits / hparams.moe_switch_temperature
+  full_expert_gate_log_probs -= mtf.reduce_logsumexp(full_expert_gate_log_probs,
+                                                     reduced_dim=experts_dim)
+  expert_gate_log_probs = mtf.gather(full_expert_gate_log_probs, expert_index,
+                                     dim=experts_dim)
 
   expert_mask = mtf.one_hot(expert_index, experts_dim, dtype=raw_gates.dtype)
 
@@ -1363,9 +1380,25 @@ def _switch_gating(
     expert_gate *= mtf.cast(mtf.equal(importance, 1.0), dtype=raw_gates.dtype)
     density_1_proxy *= mtf.cast(
         mtf.equal(importance, 1.0), dtype=raw_gates.dtype)
-  loss = (
+  load_balance_loss = (
       mtf.reduce_mean(density_1_proxy * density_1) *
       float(experts_dim.size * experts_dim.size))
+
+  kl_with_uniform = (
+      - math.log(float(experts_dim.size))
+      - mtf.reduce_logsumexp(full_expert_gate_log_probs,
+                             reduced_dim=group_size_dim)
+      + math.log(float(group_size_dim.size)))
+  if importance:
+    kl_with_uniform *= mtf.cast(mtf.equal(importance, 1.0),
+                                dtype=raw_gates.dtype)
+  kl_with_uniform = mtf.reduce_mean(kl_with_uniform)
+
+  if hparams.loss_type.lower() == "kl":
+    loss = kl_with_uniform
+  else:
+    loss = load_balance_loss
+
   if num_microbatches and num_microbatches > 1:
     tf.logging.info("Dividing load-balance loss by num_microbatches={}".format(
         num_microbatches))
@@ -1373,11 +1406,14 @@ def _switch_gating(
 
   # Logging
   if train:
-    entropy = mtf.reduce_sum(-raw_gates * mtf.log(raw_gates + 1e-9),
-                             reduced_dim=experts_dim)
+    entropy = mtf.reduce_sum(
+        -mtf.exp(full_expert_gate_log_probs) * full_expert_gate_log_probs,
+        reduced_dim=experts_dim)
     batch_entropy = mtf.reduce_mean(entropy)
     mtf.scalar_summary(name + "/entropy", batch_entropy)
     mtf.scalar_summary("expert_gate", mtf.reduce_mean(expert_gate))
+    mtf.scalar_summary("tempered_expert_gate",
+                       mtf.reduce_mean(mtf.exp(expert_gate_log_probs)))
 
     mask_count_experts = mtf.reduce_sum(expert_mask, output_shape=[experts_dim])
     total_routed = mtf.reduce_sum(mask_count_experts)
@@ -1389,7 +1425,25 @@ def _switch_gating(
     for fraction in split_fractions:
       mtf.scalar_summary("experts/" + fraction.name.replace(":", "/"),
                          mtf.reduce_mean(fraction))
-    mtf.scalar_summary("aux_loss", mtf.reduce_mean(loss))
+    dead_expert_fraction = mtf.reduce_mean(
+        mtf.cast(mtf.equal(mask_count_experts, 0.),
+                 dtype=raw_gates.dtype))
+    mtf.scalar_summary("dead_expert_fraction",
+                       dead_expert_fraction)
+    mtf.scalar_summary("load_balancing_loss",
+                       mtf.reduce_mean(load_balance_loss))
+    mtf.scalar_summary("kl_with_uniform",
+                       mtf.reduce_mean(kl_with_uniform))
+
+    split_expert_index = mtf.rename_dimension(
+        expert_index, 'batch', 'batch_split')
+    first_expert_index, second_expert_index = mtf.split(
+        split_expert_index,
+        split_expert_index.shape.get_dim_by_name('batch_split'), 2)
+    duplicate_sample = mtf.reduce_mean(
+        mtf.cast(mtf.equal(first_expert_index, second_expert_index),
+                 dtype=raw_gates.dtype))
+    mtf.scalar_summary("duplicate_sample_fraction", duplicate_sample)
 
   # Add in the z_loss for router.
   if train and hparams.moe_z_loss is not None:
@@ -1421,9 +1475,16 @@ def _switch_gating(
   # Mask out the experts that have overflowed expert capacity. Sparsify the
   # expert_gate.
   expert_gate *= expert_mask_flat
+  if hparams.moe_rloo:
+    expert_gate_log_probs *= expert_mask_flat
+    context.expert_gate_log_probs.append(expert_gate_log_probs)
 
-  combine_tensor = (
-      expert_gate * expert_mask_flat *
+  if hparams.p_dot_e:
+    combine_tensor = expert_gate
+  else:
+    combine_tensor = expert_mask_flat
+
+  combine_tensor *= (
       mtf.one_hot(expert_index, experts_dim, dtype=raw_gates.dtype) *
       mtf.one_hot(
           mtf.to_int32(position_in_expert),

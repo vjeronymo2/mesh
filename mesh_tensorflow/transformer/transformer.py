@@ -144,7 +144,8 @@ class Context(object):
                read_priority=None,
                inputs=None,
                encoder_inputs=None,
-               num_microbatches=1):
+               num_microbatches=1,
+               expert_gate_log_probs=None):
     """Create a context.
 
     Args:
@@ -201,6 +202,8 @@ class Context(object):
         decoder.
       num_microbatches: integer - greater than one if the step has been
         serialized into multiple microbatches to save memory.
+      expert_gate_log_probs: an optional list of Tensors of expert gate log
+        probs. This will be used to compute REINFORCE gradients.
     """
     self.model = model
     self.mesh = mesh
@@ -235,6 +238,7 @@ class Context(object):
     self.encoder_inputs = encoder_inputs
     self.num_microbatches = num_microbatches
     self.input_embeddings = None
+    self.expert_gate_log_probs = expert_gate_log_probs
 
   @property
   def train(self):
@@ -848,6 +852,19 @@ class Unitransformer(object):
     if self.loss_on_targets_only:
       weights *= mtf.cast(mtf.logical_not(delimited_lm_inputs_mask(targets)),
                           dtype=context.activation_dtype)
+
+    # Compute REINFORCE loss
+    if context.expert_gate_log_probs:
+      log_probs = mtf.reshape(
+          mtf.add_n(context.expert_gate_log_probs), loss.shape)
+      split_loss = mtf.rename_dimension(loss, "batch", "batch_unsplit")
+      first_loss, second_loss = mtf.split(
+          split_loss, split_loss.shape.get_dim_by_name("batch_unsplit"), 2)
+      baseline = mtf.concat([second_loss, first_loss], "batch_unsplit")
+      baseline = mtf.rename_dimension(baseline, "batch_unsplit", "batch")
+      loss += mtf.stop_gradient(loss - baseline) * mtf.cast(
+          log_probs, loss.dtype)
+
     return (mtf.reduce_sum(loss * weights) /
             self.loss_denominator(targets, context.num_microbatches))
 
@@ -1007,6 +1024,27 @@ class Unitransformer(object):
       logits: a Tensor with shape [<batch_dims>, output_vocab_dim]
       loss: an optional Scalar (if compute_loss=True)
     """
+    if mode == tf.estimator.ModeKeys.TRAIN:
+
+      def duplicate_batch(t, batch_dim_name="batch"):
+        if t:
+          # Assumes that the batch size is divisible by 2
+          half_batch_size = t.shape.get_dim_by_name(batch_dim_name).size // 2
+          t = mtf.rename_dimension(t, batch_dim_name, batch_dim_name + "_slice")
+          half_batch = mtf.slice(t, 0, half_batch_size,
+                                 batch_dim_name + "_slice")
+          t = mtf.concat([half_batch, half_batch], batch_dim_name + "_slice")
+          return mtf.rename_dimension(t, batch_dim_name + "_slice",
+                                      batch_dim_name)
+        else:
+          return t
+
+      inputs = duplicate_batch(inputs)
+      targets = duplicate_batch(targets)
+      sequence_id = duplicate_batch(sequence_id)
+      position = duplicate_batch(position)
+      encoder_sequence_id = duplicate_batch(encoder_sequence_id)
+
     batch_dims = inputs.shape.dims[:-1]
     length_dim = inputs.shape.dims[-1]
     length_range = mtf.range(inputs.mesh, length_dim, dtype=tf.int32)
@@ -1061,7 +1099,8 @@ class Unitransformer(object):
         read_priority=read_priority,
         inputs=inputs,
         encoder_inputs=encoder_inputs,
-        num_microbatches=num_microbatches)
+        num_microbatches=num_microbatches,
+        expert_gate_log_probs=[],)
     with tf.variable_scope(self.name):
       logits = self._call_internal(context, inputs, targets)
     if compute_loss:
