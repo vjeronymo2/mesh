@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Lint as: python3
 """Implementation of Flat and ProductKey Memory Layers.
 
 See the papers https://arxiv.org/abs/1907.05242 and

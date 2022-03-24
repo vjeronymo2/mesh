@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Lint as: python3
 """Custom layers for the evolved transformer.
 
 See https://arxiv.org/abs/1901.11117 for more details.

@@ -13,7 +13,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# Lint as: python3
 """Run masked LM/next sentence masked_lm pre-training for BERT."""
 
 from __future__ import absolute_import
