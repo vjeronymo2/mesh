@@ -32,6 +32,7 @@ import mesh_tensorflow.bert.tokenization as tokenization
 import six
 from six.moves import range
 import tensorflow.compat.v1 as tf
+from tensorflow.compat.v1 import estimator as tf_estimator
 
 flags = tf.flags
 
@@ -645,7 +646,7 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
     mtf_segment_ids = mtf.import_tf_tensor(mesh, segment_ids,
                                            [batch_dim, seq_dim])
 
-    is_training = (mode == tf.estimator.ModeKeys.TRAIN)
+    is_training = (mode == tf_estimator.ModeKeys.TRAIN)
 
     (start_logits, end_logits) = create_model(
         bert_config=bert_config,
@@ -654,7 +655,7 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
         input_mask=mtf_input_mask,
         segment_ids=mtf_segment_ids)
 
-    if mode == tf.estimator.ModeKeys.TRAIN:
+    if mode == tf_estimator.ModeKeys.TRAIN:
 
       def compute_loss(logits, positions):
         one_hot_positions = mtf.one_hot(positions, output_dim=seq_dim)
@@ -681,13 +682,13 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
           max_optimized_variable_size=FLAGS.max_optimized_variable_size,
           optimizer=FLAGS.optimizer,
           clip_gradients=FLAGS.clip_gradients)
-    elif mode == tf.estimator.ModeKeys.PREDICT:
+    elif mode == tf_estimator.ModeKeys.PREDICT:
       start_logits = mtf.anonymize(start_logits)
       end_logits = mtf.anonymize(end_logits)
 
     lowering = mtf.Lowering(graph, {mesh: mesh_impl})
 
-    if mode == tf.estimator.ModeKeys.TRAIN:
+    if mode == tf_estimator.ModeKeys.TRAIN:
       tf_loss = tf.to_float(lowering.export_to_tf_tensor(total_loss))
       global_step = tf.train.get_global_step()
       tf_update_ops = [lowering.lowered_operation(op) for op in update_ops]
@@ -722,7 +723,7 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
     with mtf.utils.outside_all_rewrites():
       # Copy master variables to slices. Must be called first.
       restore_hook = mtf.MtfRestoreHook(lowering)
-      if mode == tf.estimator.ModeKeys.TRAIN:
+      if mode == tf_estimator.ModeKeys.TRAIN:
         saver = tf.train.Saver(
             tf.global_variables(),
             sharded=True,
@@ -738,20 +739,20 @@ def model_fn_builder(bert_config, init_checkpoint, learning_rate,
             saver=saver,
             listeners=[saver_listener])
 
-        return tf.estimator.tpu.TPUEstimatorSpec(
+        return tf_estimator.tpu.TPUEstimatorSpec(
             mode,
             loss=tf_loss,
             train_op=train_op,
             training_hooks=[restore_hook, saver_hook],
             scaffold_fn=scaffold_fn)
-      elif mode == tf.estimator.ModeKeys.PREDICT:
+      elif mode == tf_estimator.ModeKeys.PREDICT:
         predictions = {
             "unique_ids": unique_ids,
             "start_logits": lowering.export_to_tf_tensor(start_logits),
             "end_logits": lowering.export_to_tf_tensor(end_logits),
         }
 
-        return tf.estimator.tpu.TPUEstimatorSpec(
+        return tf_estimator.tpu.TPUEstimatorSpec(
             mode,
             prediction_hooks=[restore_hook],
             predictions=predictions,
@@ -1219,15 +1220,15 @@ def main(_):
     tpu_cluster_resolver = tf.distribute.cluster_resolver.TPUClusterResolver(
         FLAGS.tpu_name, zone=FLAGS.tpu_zone, project=FLAGS.gcp_project)
 
-  run_config = tf.estimator.tpu.RunConfig(
+  run_config = tf_estimator.tpu.RunConfig(
       cluster=tpu_cluster_resolver,
       master=FLAGS.master,
       model_dir=FLAGS.output_dir,
       save_checkpoints_steps=FLAGS.save_checkpoints_steps,
-      tpu_config=tf.estimator.tpu.TPUConfig(
+      tpu_config=tf_estimator.tpu.TPUConfig(
           iterations_per_loop=FLAGS.iterations_per_loop,
           num_cores_per_replica=1,
-          per_host_input_for_training=tf.estimator.tpu.InputPipelineConfig
+          per_host_input_for_training=tf_estimator.tpu.InputPipelineConfig
           .BROADCAST))
 
   train_examples = None
@@ -1255,7 +1256,7 @@ def main(_):
 
   # If TPU is not available, this will fall back to normal Estimator on CPU
   # or GPU.
-  estimator = tf.estimator.tpu.TPUEstimator(
+  estimator = tf_estimator.tpu.TPUEstimator(
       use_tpu=FLAGS.use_tpu,
       model_fn=model_fn,
       config=run_config,

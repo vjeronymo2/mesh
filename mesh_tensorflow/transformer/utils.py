@@ -43,6 +43,7 @@ import numpy as np
 import pkg_resources
 import six
 import tensorflow.compat.v1 as tf
+from tensorflow.compat.v1 import estimator as tf_estimator
 import tensorflow_datasets as tfds
 
 from tensorflow.core.protobuf import rewriter_config_pb2  # pylint: disable=g-direct-tensorflow-import
@@ -598,7 +599,7 @@ def tpu_estimator_model_fn(model_type,
       a TPUEstimatorSpec
     """
     del labels, config
-    if mode == tf.estimator.ModeKeys.PREDICT and score_in_predict_mode:
+    if mode == tf_estimator.ModeKeys.PREDICT and score_in_predict_mode:
       mode = "score"
     global_step = tf.train.get_global_step()
     if use_tpu and "context" in params:
@@ -642,7 +643,7 @@ def tpu_estimator_model_fn(model_type,
     mesh = mtf.Mesh(graph, "my_mesh", var_placer)
 
     if (outer_batch_size and
-        mode not in [tf.estimator.ModeKeys.PREDICT, "score"]):
+        mode not in [tf_estimator.ModeKeys.PREDICT, "score"]):
       outer_batch_dim = mtf.Dimension("outer_batch", outer_batch_size)
       batch_dim = mtf.Dimension("batch", batch_size // outer_batch_size)
       batch_dims = [outer_batch_dim, batch_dim]
@@ -686,7 +687,7 @@ def tpu_estimator_model_fn(model_type,
         raise ValueError(message)
 
     # Verify that the right features exist, and transform them if necessary
-    if mode == tf.estimator.ModeKeys.PREDICT:
+    if mode == tf_estimator.ModeKeys.PREDICT:
       _verify_feature_exists("inputs", True)
       # "targets" may or may not exist depending on whether we are doing
       # evaluation or open-ended inference.
@@ -758,7 +759,7 @@ def tpu_estimator_model_fn(model_type,
           "targets": targets,
           "scores": lowering.export_to_tf_tensor(scores)
       }
-    elif mode == tf.estimator.ModeKeys.PREDICT:
+    elif mode == tf_estimator.ModeKeys.PREDICT:
       inputs = mtf_features["inputs"]
       if predict_fn:
         mtf_samples = predict_fn(
@@ -796,7 +797,7 @@ def tpu_estimator_model_fn(model_type,
           "inputs": inputs,
           "outputs": outputs}
 
-    if mode in ["score", tf.estimator.ModeKeys.PREDICT]:
+    if mode in ["score", tf_estimator.ModeKeys.PREDICT]:
       # When exporting a model, we need to communicate to TF-Serving that
       # master variables need to be copied to their slave slice variables.
       # Estimator uses a Scaffold's "local_init_op" for this purpose, so we
@@ -821,13 +822,13 @@ def tpu_estimator_model_fn(model_type,
                 name="mtf_ready_op"))
 
       return tpu_estimator.TPUEstimatorSpec(
-          mode=tf.estimator.ModeKeys.PREDICT,
+          mode=tf_estimator.ModeKeys.PREDICT,
           predictions=predictions,
           scaffold_fn=scaffold_fn,
           prediction_hooks=[mtf.MtfRestoreHook(lowering)])
 
-    assert (mode == tf.estimator.ModeKeys.TRAIN or
-            mode == tf.estimator.ModeKeys.EVAL)
+    assert (mode == tf_estimator.ModeKeys.TRAIN or
+            mode == tf_estimator.ModeKeys.EVAL)
 
     def logits_and_loss(mtf_features, num_microbatches=1):
       """Compute logits and loss.
@@ -875,7 +876,7 @@ def tpu_estimator_model_fn(model_type,
           num_microbatches=num_microbatches,
           **position_kwargs)
 
-    if mode == tf.estimator.ModeKeys.TRAIN:
+    if mode == tf_estimator.ModeKeys.TRAIN:
       num_microbatches = serialize_num_microbatches(batch_dim,
                                                     sequence_length,
                                                     mesh_shape,
@@ -1011,18 +1012,18 @@ def tpu_estimator_model_fn(model_type,
 
         if use_tpu:
           return tpu_estimator.TPUEstimatorSpec(
-              mode=tf.estimator.ModeKeys.TRAIN,
+              mode=tf_estimator.ModeKeys.TRAIN,
               loss=tf_loss,
               train_op=train_op,
               host_call=host_call,
               training_hooks=training_hooks)
         else:
-          return tf.estimator.EstimatorSpec(
-              tf.estimator.ModeKeys.TRAIN,
+          return tf_estimator.EstimatorSpec(
+              tf_estimator.ModeKeys.TRAIN,
               loss=tf_loss,
               train_op=train_op,
               training_chief_hooks=training_hooks)
-    elif mode == tf.estimator.ModeKeys.EVAL:
+    elif mode == tf_estimator.ModeKeys.EVAL:
       # perplexity eval
       logits, loss = logits_and_loss(mtf_features)
       # compute cross-entropy while still on TPU to avoid having to outfeed the
@@ -1080,7 +1081,7 @@ def tpu_estimator_model_fn(model_type,
       with mtf.utils.outside_all_rewrites():
         restore_hook = mtf.MtfRestoreHook(lowering)
       return tpu_estimator.TPUEstimatorSpec(
-          tf.estimator.ModeKeys.EVAL,
+          tf_estimator.ModeKeys.EVAL,
           evaluation_hooks=[restore_hook],
           loss=tf_loss,
           eval_metrics=eval_metrics)
@@ -2522,7 +2523,7 @@ def export_model(estimator, export_dir, vocabulary, sequence_length,
 
     features = tf.data.experimental.get_single_element(dataset)
     features["predict_batch_size"] = predict_batch_size
-    return tf.estimator.export.ServingInputReceiver(
+    return tf_estimator.export.ServingInputReceiver(
         features=features, receiver_tensors=receiver_tensors)
 
   return estimator.export_saved_model(

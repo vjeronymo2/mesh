@@ -25,6 +25,7 @@ from __future__ import print_function
 import mesh_tensorflow as mtf
 import mnist_dataset as dataset  # local file import
 import tensorflow.compat.v1 as tf
+from tensorflow.compat.v1 import estimator as tf_estimator
 
 
 tf.flags.DEFINE_string("data_dir", "/tmp/mnist_data",
@@ -126,7 +127,7 @@ def model_fn(features, labels, mode, params):
   mesh_impl = mtf.placement_mesh_impl.PlacementMeshImpl(
       mesh_shape, layout_rules, mesh_devices)
 
-  if mode == tf.estimator.ModeKeys.TRAIN:
+  if mode == tf_estimator.ModeKeys.TRAIN:
     var_grads = mtf.gradients(
         [loss], [v.outputs[0] for v in graph.trainable_variables])
     optimizer = mtf.optimize.AdafactorOptimizer()
@@ -136,11 +137,11 @@ def model_fn(features, labels, mode, params):
   restore_hook = mtf.MtfRestoreHook(lowering)
 
   tf_logits = lowering.export_to_tf_tensor(logits)
-  if mode != tf.estimator.ModeKeys.PREDICT:
+  if mode != tf_estimator.ModeKeys.PREDICT:
     tf_loss = lowering.export_to_tf_tensor(loss)
     tf.summary.scalar("loss", tf_loss)
 
-  if mode == tf.estimator.ModeKeys.TRAIN:
+  if mode == tf_estimator.ModeKeys.TRAIN:
     tf_update_ops = [lowering.lowered_operation(op) for op in update_ops]
     tf_update_ops.append(tf.assign_add(global_step, 1))
     train_op = tf.group(tf_update_ops)
@@ -169,25 +170,25 @@ def model_fn(features, labels, mode, params):
     tf.summary.scalar("train_accuracy", accuracy[1])
 
     # restore_hook must come before saver_hook
-    return tf.estimator.EstimatorSpec(
-        tf.estimator.ModeKeys.TRAIN, loss=tf_loss, train_op=train_op,
+    return tf_estimator.EstimatorSpec(
+        tf_estimator.ModeKeys.TRAIN, loss=tf_loss, train_op=train_op,
         training_chief_hooks=[restore_hook, saver_hook])
 
-  if mode == tf.estimator.ModeKeys.PREDICT:
+  if mode == tf_estimator.ModeKeys.PREDICT:
     predictions = {
         "classes": tf.argmax(tf_logits, axis=1),
         "probabilities": tf.nn.softmax(tf_logits),
     }
-    return tf.estimator.EstimatorSpec(
-        mode=tf.estimator.ModeKeys.PREDICT,
+    return tf_estimator.EstimatorSpec(
+        mode=tf_estimator.ModeKeys.PREDICT,
         predictions=predictions,
         prediction_hooks=[restore_hook],
         export_outputs={
-            "classify": tf.estimator.export.PredictOutput(predictions)
+            "classify": tf_estimator.export.PredictOutput(predictions)
         })
-  if mode == tf.estimator.ModeKeys.EVAL:
-    return tf.estimator.EstimatorSpec(
-        mode=tf.estimator.ModeKeys.EVAL,
+  if mode == tf_estimator.ModeKeys.EVAL:
+    return tf_estimator.EstimatorSpec(
+        mode=tf_estimator.ModeKeys.EVAL,
         loss=tf_loss,
         evaluation_hooks=[restore_hook],
         eval_metric_ops={
@@ -199,7 +200,7 @@ def model_fn(features, labels, mode, params):
 
 def run_mnist():
   """Run MNIST training and eval loop."""
-  mnist_classifier = tf.estimator.Estimator(
+  mnist_classifier = tf_estimator.Estimator(
       model_fn=model_fn,
       model_dir=FLAGS.model_dir)
 

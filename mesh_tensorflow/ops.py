@@ -33,6 +33,7 @@ import six
 from six.moves import xrange  # pylint: disable=redefined-builtin
 
 import tensorflow.compat.v1 as tf
+from tensorflow.compat.v1 import estimator as tf_estimator
 
 # pylint: disable=g-direct-tensorflow-import
 from tensorflow.python.ops.gen_nn_ops import conv3d_backprop_input_v2
@@ -5785,7 +5786,7 @@ def pool_fn(pool_fn_string):
     raise ValueError("Unknown pool_fn_string %s" % pool_fn_string)
 
 
-class MtfCheckpointSaverListener(tf.estimator.CheckpointSaverListener):
+class MtfCheckpointSaverListener(tf_estimator.CheckpointSaverListener):
   """Copy slices to masters before saving."""
 
   def __init__(self, lowering):
@@ -5808,7 +5809,7 @@ class MtfCheckpointSaverListener(tf.estimator.CheckpointSaverListener):
     tf.logging.info("Done with the session.")
 
 
-class MtfRestoreHook(tf.estimator.SessionRunHook):
+class MtfRestoreHook(tf_estimator.SessionRunHook):
   """Copy masters to slices after restoring."""
 
   def __init__(self, lowering):

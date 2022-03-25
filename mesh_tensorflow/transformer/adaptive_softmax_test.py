@@ -25,6 +25,7 @@ import mock
 import numpy as np
 import scipy.special
 import tensorflow.compat.v1 as tf
+from tensorflow.compat.v1 import estimator as tf_estimator
 
 
 def initialize_by_shape(shape_to_value):
@@ -348,7 +349,7 @@ class AdaptiveSoftmaxTest(tf.test.TestCase):
 
     context = mock.MagicMock()
     context.activation_dtype = tf.float32
-    context.mode = tf.estimator.ModeKeys.TRAIN
+    context.mode = tf_estimator.ModeKeys.TRAIN
 
     embeddings = tf.constant([[1, 0], [0, 2]], dtype=tf.float32)
     mtf_embeddings = mtf.import_tf_tensor(
@@ -386,7 +387,7 @@ class AdaptiveSoftmaxTest(tf.test.TestCase):
 
     context = mock.MagicMock()
     context.activation_dtype = tf.float32
-    context.mode = tf.estimator.ModeKeys.EVAL
+    context.mode = tf_estimator.ModeKeys.EVAL
 
     embeddings = tf.constant([[1, 0], [0, 2]], dtype=tf.float32)
     mtf_embeddings = mtf.import_tf_tensor(

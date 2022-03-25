@@ -29,6 +29,7 @@ import mesh_tensorflow.bert.optimization as optimization_lib
 import mesh_tensorflow.bert.tokenization as tokenization
 from six.moves import range
 import tensorflow.compat.v1 as tf
+from tensorflow.compat.v1 import estimator as tf_estimator
 
 flags = tf.flags
 
@@ -694,7 +695,7 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
                                            [batch_dim, seq_dim])
     mtf_label_ids = mtf.import_tf_tensor(mesh, label_ids, [batch_dim])
 
-    is_training = (mode == tf.estimator.ModeKeys.TRAIN)
+    is_training = (mode == tf_estimator.ModeKeys.TRAIN)
 
     (total_loss, per_example_loss, logits,
      probabilities) = create_model(bert_config, is_training, mtf_input_ids,
@@ -705,7 +706,7 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
     per_example_loss = mtf.anonymize(per_example_loss)
     logits = mtf.anonymize(logits)
 
-    if mode == tf.estimator.ModeKeys.TRAIN:
+    if mode == tf_estimator.ModeKeys.TRAIN:
       _, update_ops = optimization_lib.create_optimizer(
           total_loss,
           learning_rate,
@@ -718,13 +719,13 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
     lowering = mtf.Lowering(graph, {mesh: mesh_impl})
     tf_loss = tf.to_float(lowering.export_to_tf_tensor(total_loss))
 
-    if mode == tf.estimator.ModeKeys.TRAIN:
+    if mode == tf_estimator.ModeKeys.TRAIN:
       global_step = tf.train.get_global_step()
       tf_update_ops = [lowering.lowered_operation(op) for op in update_ops]
       tf_update_ops.append(tf.assign_add(global_step, 1))
       tf.logging.info("tf_update_ops: {}".format(tf_update_ops))
       train_op = tf.group(tf_update_ops)
-    elif mode == tf.estimator.ModeKeys.EVAL:
+    elif mode == tf_estimator.ModeKeys.EVAL:
 
       def metric_fn(per_example_loss, label_ids, logits, is_real_example):
         predictions = tf.argmax(logits, axis=-1, output_type=tf.int32)
@@ -768,7 +769,7 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
     with mtf.utils.outside_all_rewrites():
       # Copy master variables to slices. Must be called first.
       restore_hook = mtf.MtfRestoreHook(lowering)
-      if mode == tf.estimator.ModeKeys.TRAIN:
+      if mode == tf_estimator.ModeKeys.TRAIN:
         saver = tf.train.Saver(
             tf.global_variables(),
             sharded=True,
@@ -784,21 +785,21 @@ def model_fn_builder(bert_config, num_labels, init_checkpoint, learning_rate,
             saver=saver,
             listeners=[saver_listener])
 
-        return tf.estimator.tpu.TPUEstimatorSpec(
+        return tf_estimator.tpu.TPUEstimatorSpec(
             mode,
             loss=tf_loss,
             train_op=train_op,
             training_hooks=[restore_hook, saver_hook],
             scaffold_fn=scaffold_fn)
-      elif mode == tf.estimator.ModeKeys.EVAL:
-        return tf.estimator.tpu.TPUEstimatorSpec(
+      elif mode == tf_estimator.ModeKeys.EVAL:
+        return tf_estimator.tpu.TPUEstimatorSpec(
             mode,
             evaluation_hooks=[restore_hook],
             loss=tf_loss,
             eval_metrics=eval_metrics,
             scaffold_fn=scaffold_fn)
       else:
-        return tf.estimator.tpu.TPUEstimatorSpec(
+        return tf_estimator.tpu.TPUEstimatorSpec(
             mode,
             prediction_hooks=[restore_hook],
             predictions={
@@ -925,15 +926,15 @@ def main(_):
     tpu_cluster_resolver = tf.distribute.cluster_resolver.TPUClusterResolver(
         FLAGS.tpu_name, zone=FLAGS.tpu_zone, project=FLAGS.gcp_project)
 
-  run_config = tf.estimator.tpu.RunConfig(
+  run_config = tf_estimator.tpu.RunConfig(
       cluster=tpu_cluster_resolver,
       master=FLAGS.master,
       model_dir=FLAGS.output_dir,
       save_checkpoints_steps=FLAGS.save_checkpoints_steps,
-      tpu_config=tf.estimator.tpu.TPUConfig(
+      tpu_config=tf_estimator.tpu.TPUConfig(
           iterations_per_loop=FLAGS.iterations_per_loop,
           num_cores_per_replica=1,
-          per_host_input_for_training=tf.estimator.tpu.InputPipelineConfig
+          per_host_input_for_training=tf_estimator.tpu.InputPipelineConfig
           .BROADCAST))
 
   train_examples = None
@@ -956,7 +957,7 @@ def main(_):
 
   # If TPU is not available, this will fall back to normal Estimator on CPU
   # or GPU.
-  estimator = tf.estimator.tpu.TPUEstimator(
+  estimator = tf_estimator.tpu.TPUEstimator(
       use_tpu=FLAGS.use_tpu,
       model_fn=model_fn,
       config=run_config,

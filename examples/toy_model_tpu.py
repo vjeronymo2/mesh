@@ -22,6 +22,7 @@ from __future__ import print_function
 import mesh_tensorflow as mtf
 import numpy
 import tensorflow.compat.v1 as tf
+from tensorflow.compat.v1 import estimator as tf_estimator
 
 from tensorflow.python.data.ops.dataset_ops import Dataset
 from tensorflow.python.platform import flags
@@ -176,7 +177,7 @@ def model_fn(features, labels, mode, params):
     logits, loss = toy_model(features, mesh)
 
   # TRAIN mode
-  if mode == tf.estimator.ModeKeys.TRAIN:
+  if mode == tf_estimator.ModeKeys.TRAIN:
     var_grads = mtf.gradients([loss],
                               [v.outputs[0] for v in graph.trainable_variables])
     if FLAGS.optimizer == 'Adafactor':
@@ -193,7 +194,7 @@ def model_fn(features, labels, mode, params):
 
   tf_loss = tf.to_float(lowering.export_to_tf_tensor(loss))
 
-  if mode == tf.estimator.ModeKeys.TRAIN:
+  if mode == tf_estimator.ModeKeys.TRAIN:
     tf_update_ops = [lowering.lowered_operation(op) for op in update_ops]
     tf_update_ops.append(tf.assign_add(global_step, 1))
     tf.logging.info('tf_update_ops: {}'.format(tf_update_ops))
@@ -204,7 +205,7 @@ def model_fn(features, labels, mode, params):
   with mtf.utils.outside_all_rewrites():
     # Copy master variables to slices. Must be called first.
     restore_hook = mtf.MtfRestoreHook(lowering)
-    if mode == tf.estimator.ModeKeys.TRAIN:
+    if mode == tf_estimator.ModeKeys.TRAIN:
       saver = tf.train.Saver(
           tf.global_variables(),
           sharded=True,
@@ -221,11 +222,11 @@ def model_fn(features, labels, mode, params):
           listeners=[saver_listener])
 
       return tpu_estimator.TPUEstimatorSpec(
-          tf.estimator.ModeKeys.TRAIN,
+          tf_estimator.ModeKeys.TRAIN,
           loss=tf_loss,
           train_op=train_op,
           training_hooks=[restore_hook, saver_hook])
-    elif mode == tf.estimator.ModeKeys.EVAL:
+    elif mode == tf_estimator.ModeKeys.EVAL:
 
       def metric_fn(tf_logits):
         mean_logits = tf.metrics.mean(tf_logits)
@@ -234,7 +235,7 @@ def model_fn(features, labels, mode, params):
       eval_metrics = (metric_fn, [tf_logits])
 
       return tpu_estimator.TPUEstimatorSpec(
-          tf.estimator.ModeKeys.EVAL,
+          tf_estimator.ModeKeys.EVAL,
           evaluation_hooks=[restore_hook],
           loss=tf_loss,
           eval_metrics=eval_metrics)

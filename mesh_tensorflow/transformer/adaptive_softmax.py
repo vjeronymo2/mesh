@@ -28,6 +28,7 @@ from mesh_tensorflow.transformer import transformer
 from mesh_tensorflow.transformer import vocab_embeddings
 
 import tensorflow.compat.v1 as tf
+from tensorflow.compat.v1 import estimator as tf_estimator
 
 
 class _Cluster(object):
@@ -329,7 +330,7 @@ class AdaptiveSoftmaxVocabEmbedding(object):
     Returns:
       an mtf.Tensor
     """
-    if context.mode == tf.estimator.ModeKeys.TRAIN:
+    if context.mode == tf_estimator.ModeKeys.TRAIN:
       return hidden
     else:
       return self._hidden_to_logits(hidden, context)
