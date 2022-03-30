@@ -1165,6 +1165,7 @@ class Unitransformer(object):
     shifted_inputs = autoregressive_inputs(inputs)
     with tf.variable_scope(self.name):
       logits = self._call_internal(context_first_part, shifted_inputs)
+      logits_output = logits
     del logits
     constant_states = context_first_part.constant_states
     if not has_partial_sequences:
@@ -1260,7 +1261,7 @@ class Unitransformer(object):
           reduced_dim=length_dim)
       outputs = mtf.dynamic_shift(
           outputs, -partial_length, length_dim, wrap=False)
-    return outputs
+    return outputs, logits_output
 
   def beam_search(self,
                   inputs,

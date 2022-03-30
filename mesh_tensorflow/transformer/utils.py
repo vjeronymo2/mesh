@@ -42,6 +42,7 @@ from mesh_tensorflow.transformer import transformer
 import numpy as np
 import pkg_resources
 import six
+import torch
 import tensorflow.compat.v1 as tf
 from tensorflow.compat.v1 import estimator as tf_estimator
 import tensorflow_datasets as tfds
@@ -776,13 +777,15 @@ def tpu_estimator_model_fn(model_type,
       elif isinstance(
           transformer_model,
           (transformer.Bitransformer, transformer.StudentTeacher)):
-        mtf_samples = transformer_model.decode(
+        mtf_samples, scores = transformer_model.decode(
             inputs, variable_dtype=get_variable_dtype())
       else:
         raise ValueError("unrecognized class")
       mtf_samples = mtf.anonymize(mtf_samples)
+      scores = mtf.anonymize(scores)
       inputs = mtf.anonymize(inputs)
       lowering = mtf.Lowering(graph, {mesh: mesh_impl}, autostack=autostack)
+      scores = lowering.export_to_tf_tensor(scores)
       inputs = clean_decodes(lowering.export_to_tf_tensor(inputs))
       outputs = clean_decodes(lowering.export_to_tf_tensor(mtf_samples))
 
@@ -795,7 +798,8 @@ def tpu_estimator_model_fn(model_type,
 
       predictions = {
           "inputs": inputs,
-          "outputs": outputs}
+          "outputs": outputs,
+          "scores": scores}
 
     if mode in ["score", tf_estimator.ModeKeys.PREDICT]:
       # When exporting a model, we need to communicate to TF-Serving that
@@ -1350,11 +1354,19 @@ def decode(estimator,
         result["inputs"], inputs_vocabulary(vocabulary))
     output_string = _maybe_detokenize(
         result["outputs"], targets_vocabulary(vocabulary))
+        
+    scores = result["scores"][0]
+    # scores = scores[[6136, 1176]].tolist()
+    scores = scores[[259, 6274]].tolist()
+    scores = [float(score) for score in scores]
+    probs = torch.nn.functional.log_softmax(torch.from_numpy(np.array(scores)))
+    score_string = probs.tolist()[1]
+    output_string = f"{output_string}\t{score_string}"
     yield output_string
     if i & (i - 1) == 0:
       # LOG every power of 2.
-      tf.logging.info("decoded %s: %s", i, input_string)
-      tf.logging.info("            -> %s", output_string)
+      tf.logging.info("decoded {}: {}".format(i, input_string))
+      tf.logging.info("            -> {}".format(output_string))
 
 
 @gin.configurable
